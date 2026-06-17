@@ -105,7 +105,7 @@ def combo_to_hands(combo):
         r=combo[0]
         for i,s1 in enumerate(SUITS):
             for s2 in SUITS[i+1:]: hands.append([Card.new(r+s1),Card.new(r+s2)])
-    elif combo[2]==\'s\':
+    elif combo[2]=='s':
         for s in SUITS: hands.append([Card.new(combo[0]+s),Card.new(combo[1]+s)])
     else:
         for s1 in SUITS:
@@ -318,7 +318,7 @@ def main():
 
                     # Afișare acțiune
                     action_class = "fold" if "FOLD" in action else "raise" if "RAISE" in action or "3-BET" in action else "call" if "CALL" in action else "bet" if "BET" in action else "check"
-                    st.markdown(f\'<div class="big-action {action_class}-box">{action}</div>\', unsafe_allow_html=True)
+                    st.markdown(f'<div class="big-action {action_class}-box">{action}</div>', unsafe_allow_html=True)
                     st.info(f"💡 {info}")
 
                     # Progress bar equity
@@ -349,7 +349,8 @@ def main():
                 else:
                     row_cells.append(f"⬛")
             rows.append("|" + "|".join(row_cells) + "|")
-        st.markdown("\n".join(rows))
+        st.markdown("
+".join(rows))
         st.caption("🟩 = în range | ⬛ = fold")
 
     # ════════════════════════════════════════════
@@ -392,8 +393,8 @@ def main():
 
         d = st.session_state.drill_combo
         if d:
-            st.markdown(f"### {d[\'combo\']} din {d[\'pos\']}")
-            st.write(f"Situație: {d[\'desc\']}")
+            st.markdown(f"### {d['combo']} din {d['pos']}")
+            st.write(f"Situație: {d['desc']}")
 
             if d["sit"] == "RFI":
                 options = ["RAISE","FOLD"]
@@ -406,9 +407,9 @@ def main():
                     st.session_state.drill_total += 1
                     if opt == d["correct"]:
                         st.session_state.drill_correct += 1
-                        st.success(f"✅ CORECT! {d[\'combo\']} → {d[\'correct\']}")
+                        st.success(f"✅ CORECT! {d['combo']} → {d['correct']}")
                     else:
-                        st.error(f"❌ GREȘIT. Corect: {d[\'correct\']}")
+                        st.error(f"❌ GREȘIT. Corect: {d['correct']}")
                     st.session_state.drill_combo = None
                     st.rerun()
 
