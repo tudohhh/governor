@@ -9,12 +9,6 @@ def translate_card(c_str):
     val = 't' if val == '10' else val.lower()
     return f"{val.upper()}{color_map.get(suit, 's')}"
 
-def get_decision(equity):
-    if equity >= 70: return "VERDE: Agresiv (Valoare Maximă)", "green"
-    elif equity >= 50: return "GALBEN: Calculează (Pot Odds favorabile)", "orange"
-    elif equity >= 30: return "PORTOCALIU: Prudent (Așteaptă un preț bun)", "orange"
-    else: return "ROȘU: FOLD (Nu merită riscul)", "red"
-
 def calculate_equity(hand, board, iterations=500):
     evaluator = Evaluator()
     wins = 0
@@ -29,33 +23,34 @@ def calculate_equity(hand, board, iterations=500):
     return (wins / iterations) * 100
 
 def main():
-    st.title("♠️ Poker Assistant Pro")
+    st.title("♠️ Poker Assistant Pro - EV Mode")
+    
     p1 = st.text_input("Cartea 1", "Ai")
     p2 = st.text_input("Cartea 2", "Kr")
-    board_input = st.text_input("Board (ex: 10iJf2t)", "10iJf2t")
+    board_input = st.text_input("Board", "10iJf2t")
+    pot_size = st.number_input("Potul actual ($)", min_value=0.0, value=100.0)
+    call_amount = st.number_input("Cât trebuie să plătești ($)", min_value=0.0, value=20.0)
     
-    if st.button("Analizează"):
+    if st.button("Calculează EV"):
         try:
-            # Parsare compactă
-            raw_hand = [p1, p2]
-            hand = [Card.new(translate_card(c)) for c in raw_hand]
-            
-            # Parsare board compact
-            b_str = board_input
+            hand = [Card.new(translate_card(p1)), Card.new(translate_card(p2))]
             b_cards = []
-            while len(b_str) > 0:
-                if b_str.startswith('10'): b_cards.append(b_str[:3]); b_str = b_str[3:]
-                else: b_cards.append(b_str[:2]); b_str = b_str[2:]
+            temp = board_input
+            while len(temp) > 0:
+                if temp.startswith('10'): b_cards.append(temp[:3]); temp = temp[3:]
+                else: b_cards.append(temp[:2]); temp = temp[2:]
             board = [Card.new(translate_card(c)) for c in b_cards]
             
-            equity = calculate_equity(hand, board)
-            msg, color = get_decision(equity)
+            equity = calculate_equity(hand, board) / 100
+            ev = (equity * (pot_size + call_amount)) - call_amount
             
-            st.markdown(f"### Șanse: {equity:.1f}%")
-            st.markdown(f"### <span style='color:{color}'>{msg}</span>", unsafe_allow_html=True)
-            
+            st.markdown(f"### Șanse: {equity*100:.1f}%")
+            if ev > 0:
+                st.success(f"EV Pozitiv: +${ev:.2f} (Profitabil pe termen lung)")
+            else:
+                st.error(f"EV Negativ: -${abs(ev):.2f} (Pierdere pe termen lung)")
         except Exception:
-            st.error("Format invalid. Folosește: 10i, Ai, Jf (fără spații)")
+            st.error("Format eronat. Folosește: 10i, Ai, Jf (fără spații)")
 
 if __name__ == "__main__":
     main()
