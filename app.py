@@ -23,16 +23,17 @@ def calculate_equity(hand, board, iterations=500):
     return (wins / iterations) * 100
 
 def main():
-    st.title("♠️ Poker Assistant Pro - EV Mode")
+    st.title("♠️ Poker Assistant Pro - Pro Mode")
     
     p1 = st.text_input("Cartea 1", "Ai")
     p2 = st.text_input("Cartea 2", "Kr")
     board_input = st.text_input("Board", "10iJf2t")
     pot_size = st.number_input("Potul actual ($)", min_value=0.0, value=100.0)
-    call_amount = st.number_input("Cât trebuie să plătești ($)", min_value=0.0, value=20.0)
+    call_amount = st.number_input("Cost Call ($)", min_value=0.0, value=20.0)
     
-    if st.button("Calculează EV"):
+    if st.button("Analizează & Outs"):
         try:
+            # Parsare
             hand = [Card.new(translate_card(p1)), Card.new(translate_card(p2))]
             b_cards = []
             temp = board_input
@@ -41,16 +42,25 @@ def main():
                 else: b_cards.append(temp[:2]); temp = temp[2:]
             board = [Card.new(translate_card(c)) for c in b_cards]
             
+            # Calcul
             equity = calculate_equity(hand, board) / 100
             ev = (equity * (pot_size + call_amount)) - call_amount
             
-            st.markdown(f"### Șanse: {equity*100:.1f}%")
-            if ev > 0:
-                st.success(f"EV Pozitiv: +${ev:.2f} (Profitabil pe termen lung)")
-            else:
-                st.error(f"EV Negativ: -${abs(ev):.2f} (Pierdere pe termen lung)")
+            # Afișaj principal
+            st.markdown(f"### Equity: {equity*100:.1f}%")
+            if ev > 0: st.success(f"EV Pozitiv: +${ev:.2f}")
+            else: st.error(f"EV Negativ: -${abs(ev):.2f}")
+            
+            # Tabel de Outs (Cheat Sheet)
+            st.markdown("---")
+            st.subheader("📊 Cheat Sheet - Outs pe Turn/River")
+            st.table({
+                "Outs": [4, 8, 9, 12, 15],
+                "Procent estimat (Turn -> River)": ["8%", "17%", "19%", "26%", "33%"]
+            })
+            st.caption("*Exemplu: 9 outs (Flush Draw) = ~19% șanse pe Turn.")
         except Exception:
-            st.error("Format eronat. Folosește: 10i, Ai, Jf (fără spații)")
+            st.error("Format eronat.")
 
 if __name__ == "__main__":
     main()
