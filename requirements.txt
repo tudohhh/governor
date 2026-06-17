@@ -1,1 +1,2 @@
-streamlit\ntreys\n
+streamlit
+treys==0.1.8
