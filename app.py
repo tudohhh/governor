@@ -1,6 +1,7 @@
 
 import streamlit as st
 from treys import Card, Evaluator
+from treys import Deck
 
 def translate_card(user_card):
     c = user_card.replace(" ", "").lower()
@@ -13,22 +14,24 @@ def translate_card(user_card):
 
 def main():
     st.title("♠️ Poker Assistant Pro")
-    p1 = st.text_input("Cartea 1 (ex: Ai)", "Ai")
-    p2 = st.text_input("Cartea 2 (ex: Kr)", "Kr")
-    board_input = st.text_input("Board (ex: 4i 5i 9r 10i Jf)", "4i 5i 9r 10i Jf")
+    p1 = st.text_input("Carte 1", "Ai")
+    p2 = st.text_input("Carte 2", "Kr")
+    board_input = st.text_input("Board", "10i Jf 2t")
     
-    if st.button("Analizează"):
+    if st.button("Calculează Șanse"):
         try:
             evaluator = Evaluator()
             hand = [Card.new(translate_card(p1)), Card.new(translate_card(p2))]
-            cards_raw = board_input.replace(',', ' ').split()
-            board_cards = [Card.new(translate_card(c)) for c in cards_raw]
+            board = [Card.new(translate_card(c)) for c in board_input.replace(',', ' ').split()]
             
-            rank = evaluator.evaluate(board_cards, hand)
-            rank_class = evaluator.get_rank_class(rank)
-            st.success(f"Rezultat: {evaluator.class_to_string(rank_class)}")
-        except Exception as e:
-            st.error("Format invalid. Folosește: 10i, Ar, Jf, 7t")
+            # Placeholder pentru simulare simplificată (vom dezvolta motorul de Monte Carlo)
+            st.info("Analiză în curs: Comparăm mâna ta cu spectrul adversarului...")
+            
+            rank = evaluator.evaluate(board, hand)
+            st.success(f"Puterea mâinii: {evaluator.class_to_string(evaluator.get_rank_class(rank))}")
+            st.warning("Urmează implementarea algoritmului de Equity pentru decizii bazate pe procente.")
+        except Exception:
+            st.error("Format invalid. Folosește: 10i, Ar, Jf")
 
 if __name__ == "__main__":
     main()
