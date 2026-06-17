@@ -2,33 +2,45 @@
 import streamlit as st
 from treys import Card, Evaluator
 
-def parse_cards(card_str):
-    return [Card.new(c.strip()) for c in card_str.split() if c.strip()]
+def translate_card(user_card):
+    # Eliminăm orice spațiu introdus din greșeală și transformăm în litere mici
+    c = user_card.replace(" ", "").lower()
+    
+    # Valoarea este tot ce e înainte de ultimul caracter (semnul)
+    val = c[:-1]
+    suit = c[-1]
+    
+    # Mapare culori
+    color_map = {'i': 'h', 'r': 'd', 'f': 's', 't': 'c'}
+    
+    # Corecții pentru formatul treys
+    if val == '10': val = 't'
+    if val == 'as': val = 'a'
+    
+    # Rezultat: ex. 'Th', 'Ad', 'Js', '7c'
+    return f"{val.upper()}{color_map.get(suit, 's')}"
 
 def main():
-    st.set_page_config(page_title="Poker Assistant Pro", page_icon="♠️")
+    st.set_page_config(page_title="Poker Assistant", page_icon="♠️")
     st.title("♠️ Poker Assistant Pro")
     
-    col1, col2 = st.columns(2)
-    p_card1 = col1.text_input("Jucător C1", "Ah").strip()
-    p_card2 = col2.text_input("Jucător C2", "Ks").strip()
+    c1, c2 = st.columns(2)
+    p1 = c1.text_input("Cartea 1 (ex: Ai)", "Ai")
+    p2 = c2.text_input("Cartea 2 (ex: Kr)", "Kr")
+    board_input = st.text_input("Board (ex: 10i,Jf,2t)", "10i,Jf,2t")
     
-    board_input = st.text_input("Board (ex: Qh Jd 2c)", "Qh Jd 2c").strip()
-    
-    if st.button("Analizează Mâna"):
+    if st.button("Analizează"):
         try:
             evaluator = Evaluator()
-            hand = [Card.new(p_card1), Card.new(p_card2)]
-            board = parse_cards(board_input)
+            hand = [Card.new(translate_card(p1)), Card.new(translate_card(p2))]
+            # Separăm prin virgulă sau spațiu
+            cards_raw = board_input.replace(',', ' ').split()
+            board_cards = [Card.new(translate_card(c)) for c in cards_raw]
             
-            # Calculăm rangul (scorul)
-            rank = evaluator.evaluate(board, hand)
-            class_name = evaluator.get_rank_string(rank)
-            
-            st.success(f"Rezultat: {class_name}")
-            st.write(f"Scor numeric: {rank} (mai mic e mai bine!)")
-        except Exception as e:
-            st.error(f"Eroare: Verifică formatul cărților (ex: Ah, Ks, Qc). Eroare: {e}")
+            rank = evaluator.evaluate(board_cards, hand)
+            st.success(f"Rezultat: {evaluator.get_rank_string(rank)}")
+        except Exception:
+            st.error("Format invalid! Folosește: 10i, Ar, Jf, 7t (fără spațiu între cifră și semn)")
 
 if __name__ == "__main__":
     main()
