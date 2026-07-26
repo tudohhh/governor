@@ -85,15 +85,17 @@ def _cfr_walk(node, p0, p1):
         ev[0] += prob * cev[0]
         ev[1] += prob * cev[1]
 
-    # Update regrets
+    # Update regrets with counterfactual reach probability weighting
     for action, prob in strategy.items():
         if action not in child_evs:
             continue
         cev = child_evs[action]
         if node.player == 1:
-            node.regret_sum[action] += cev[0] - ev[0]
+            # Hero's regret: weighted by villain's reach probability
+            node.regret_sum[action] += p1 * (cev[0] - ev[0])
         elif node.player == 2:
-            node.regret_sum[action] += cev[1] - ev[1]
+            # Villain's regret: weighted by hero's reach probability
+            node.regret_sum[action] += p0 * (cev[1] - ev[1])
 
     return ev[0], ev[1]
 
