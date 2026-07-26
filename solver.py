@@ -1,240 +1,227 @@
 """
-Miniature CFR (Counterfactual Regret Minimization) solver for single-street subgames.
-Solves river and turn spots for mixed strategies (bet X% / check Y%).
+Real Counterfactual Regret Minimization (CFR) solver for river subgames.
+Implements recursive tree traversal with regret matching.
 """
 import random
 import math
 from collections import defaultdict
 
 
-class GameNode:
-    """Node in the game tree: represents a decision point."""
-    def __init__(self, name, player, actions, board="", pot=1.0):
-        self.name = name
-        self.player = player  # 0 = hero, 1 = villain
-        self.actions = actions  # list of action names
-        self.board = board
-        self.pot = pot
-        self.children = {}  # action -> GameNode
-        self.strategy = {}  # action -> probability
-        self.regret_sum = defaultdict(float)
-        self.strategy_sum = defaultdict(float)
+class CFRNode:
+    """A node in the CFR game tree."""
+    def __init__(self, actions, player):
+        self.actions = actions
+        self.player = player  # 0 = chance, 1 = hero, 2 = villain
+        self.regret_sum = {a: 0.0 for a in actions}
+        self.strategy_sum = {a: 0.0 for a in actions}
+        self.children = {}  # action -> CFRNode
+        self.terminal_ev = None  # For terminal nodes: (hero_ev, villain_ev)
+        self.is_chance = (player == 0)
 
-    def set_terminal(self, hero_equity):
-        self.is_terminal = True
-        self.hero_equity = hero_equity
-
-    def get_strategy(self, realization_weight=1.0):
-        """Get current strategy from regret matching."""
-        normalizing_sum = 0.0
-        strat = {}
-
-        for action in self.actions:
-            strat[action] = max(0.0, self.regret_sum[action])
-            normalizing_sum += strat[action]
-
-        if normalizing_sum > 0:
-            for action in self.actions:
-                strat[action] /= normalizing_sum
+    def get_strategy(self, weight=1.0):
+        """Regret matching: strategy proportional to positive regrets."""
+        normalizing = sum(max(0, self.regret_sum[a]) for a in self.actions)
+        strategy = {}
+        if normalizing > 0:
+            for a in self.actions:
+                strategy[a] = max(0, self.regret_sum[a]) / normalizing
         else:
-            prob = 1.0 / len(self.actions)
-            for action in self.actions:
-                strat[action] = prob
+            for a in self.actions:
+                strategy[a] = 1.0 / len(self.actions)
 
-        for action in self.actions:
-            self.strategy_sum[action] += realization_weight * strat[action]
-
-        self.strategy = strat
-        return strat
+        for a in self.actions:
+            self.strategy_sum[a] += weight * strategy[a]
+        return strategy
 
     def get_average_strategy(self):
-        """Get time-averaged strategy (Nash equilibrium approximation)."""
-        normalizing_sum = sum(self.strategy_sum.values())
-        avg = {}
-        if normalizing_sum > 0:
-            for action in self.actions:
-                avg[action] = self.strategy_sum[action] / normalizing_sum
+        """Return time-averaged (Nash) strategy."""
+        total = sum(self.strategy_sum.values())
+        if total > 0:
+            return {a: self.strategy_sum[a] / total for a in self.actions}
+        return {a: 1.0 / len(self.actions) for a in self.actions}
+
+
+class ChanceNode(CFRNode):
+    """Chance node: nature deals a card. Each action = a possible outcome with probability."""
+    def __init__(self, outcomes_with_probs):
+        super().__init__([o[0] for o in outcomes_with_probs], player=0)
+        self.probs = {o[0]: o[1] for o in outcomes_with_probs}
+
+    def get_strategy(self, weight=1.0):
+        return {a: self.probs[a] for a in self.actions}
+
+
+def cfr(root, iterations=1000):
+    """Run CFR algorithm starting from root node."""
+    for t in range(iterations):
+        _cfr_walk(root, 1.0, 1.0)
+    return {a: root.get_average_strategy()[a] for a in root.actions}
+
+
+def _cfr_walk(node, p0, p1):
+    """Recursive CFR walk. Returns (hero_ev, villain_ev)."""
+    if node.terminal_ev is not None:
+        return node.terminal_ev[0], node.terminal_ev[1]
+
+    strategy = node.get_strategy(p0 if node.player == 1 else p1)
+    ev = [0.0, 0.0]
+
+    child_evs = {}
+    for action, prob in strategy.items():
+        child = node.children.get(action)
+        if child is None:
+            continue
+        if node.player == 1:
+            new_p0 = p0 * prob
+            new_p1 = p1
+        elif node.player == 2:
+            new_p0 = p0
+            new_p1 = p1 * prob
         else:
-            prob = 1.0 / len(self.actions)
-            for action in self.actions:
-                avg[action] = prob
-        return avg
+            new_p0, new_p1 = p0, p1
+
+        cev = _cfr_walk(child, new_p0, new_p1)
+        child_evs[action] = cev
+        ev[0] += prob * cev[0]
+        ev[1] += prob * cev[1]
+
+    # Update regrets
+    for action, prob in strategy.items():
+        if action not in child_evs:
+            continue
+        cev = child_evs[action]
+        if node.player == 1:
+            node.regret_sum[action] += cev[0] - ev[0]
+        elif node.player == 2:
+            node.regret_sum[action] += cev[1] - ev[1]
+
+    return ev[0], ev[1]
 
 
-class RiverSolver:
+class RiverGame:
     """
-    CFR solver for river spots.
-    Given: board, hero range equity, pot size, stack size.
-    Produces: optimal bet/check frequencies and sizing.
-    """
-
-    def __init__(self, pot=1.0, stack=1.0, hero_equity=0.5, ip=True):
-        self.pot = pot
-        self.stack = stack
-        self.hero_equity = hero_equity
-        self.ip = ip  # in position?
-        self.spr = stack / pot if pot > 0 else float('inf')
-
-    def solve(self, iterations=500):
-        """Run CFR and return optimal strategy."""
-        # Simplified river game tree:
-        # IP: check or bet (small, medium, large)
-        # OOP: after check -> check or bet; after bet -> call/fold/raise
-
-        bet_sizes = self._get_bet_sizes()
-
-        # For IP river: we decide check or bet
-        # Villain faces the bet: decides call or fold
-        # Their calling frequency depends on our bet size and pot odds
-
-        best_action = None
-        best_ev = -float('inf')
-        results = {}
-
-        for size_name, bet_pct in bet_sizes:
-            bet_amount = self.pot * bet_pct
-            # Villain MDF: they need to defend enough to make us indifferent
-            mdf = self.pot / (self.pot + bet_amount) if (self.pot + bet_amount) > 0 else 1.0
-            villain_call_pct = mdf
-
-            # EV of betting:
-            # When villain folds: we win pot * (1 - villain_call_pct)
-            # When villain calls: we win (pot + bet) * equity - bet * (1 - equity)
-            ev_fold = self.pot * (1 - villain_call_pct)
-            ev_call = (self.pot + 2 * bet_amount) * self.hero_equity - bet_amount
-            ev_bet = ev_fold + villain_call_pct * ev_call
-
-            # EV of checking (simplified: pot * equity)
-            ev_check = self.pot * self.hero_equity
-
-            results[size_name] = {
-                "action": "BET",
-                "sizing_pct": bet_pct,
-                "sizing_bb": round(bet_amount, 1),
-                "ev_bet": round(ev_bet, 4),
-                "ev_check": round(ev_check, 4),
-                "ev_diff": round(ev_bet - ev_check, 4),
-                "villain_defend_pct": round(villain_call_pct * 100),
-            }
-
-            if ev_bet > best_ev:
-                best_ev = ev_bet
-                best_action = size_name
-
-        # Determine optimal strategy
-        ev_check = self.pot * self.hero_equity
-
-        if best_ev > ev_check * 1.05:
-            strategy_type = "value_bet"
-            optimal = results[best_action]
-        elif best_ev > ev_check:
-            strategy_type = "thin_value"
-            optimal = results[best_action]
-        elif self.hero_equity < 0.30:
-            strategy_type = "bluff_candidate"
-            optimal = results["medium"]
-        else:
-            strategy_type = "check"
-            optimal = {
-                "action": "CHECK",
-                "sizing_pct": 0,
-                "ev_bet": best_ev,
-                "ev_check": ev_check,
-                "ev_diff": best_ev - ev_check,
-                "villain_defend_pct": 0,
-            }
-
-        return {
-            "strategy_type": strategy_type,
-            "optimal": optimal,
-            "all_options": results,
-            "spr": round(self.spr, 1),
-            "hero_equity": self.hero_equity,
-        }
-
-
-    def _get_bet_sizes(self):
-        """Available bet sizes based on SPR."""
-        if self.spr < 1:
-            return [("all_in", self.spr)]
-        elif self.spr < 3:
-            return [("small", 0.50), ("large", self.spr)]
-        elif self.spr < 6:
-            return [("small", 0.33), ("medium", 0.66), ("large", 1.0)]
-        else:
-            return [("small", 0.33), ("medium", 0.66), ("large", 1.0), ("overbet", min(1.5, self.spr))]
-
-
-class TurnSolver:
-    """
-    2-street solver: turn + river planning.
-    Uses simplified CFR to determine optimal turn action given river implications.
+    Real river subgame solved with CFR.
+    Decision tree: hero bets or checks -> villain responds -> terminal equity.
     """
 
-    def __init__(self, pot=1.0, stack=1.0, hero_equity=0.5, ip=True, board_texture="dry"):
-        self.pot = pot
-        self.stack = stack
+    def __init__(self, pot, stack, hero_equity, ip=True):
+        self.pot = float(pot)
+        self.stack = float(stack)
+        self.spr = stack / pot if pot > 0 else 0
         self.hero_equity = hero_equity
         self.ip = ip
-        self.board_texture = board_texture
-        self.spr = stack / pot if pot > 0 else float('inf')
 
-    def solve(self, iterations=300):
-        """Solve turn + river strategy."""
-        spr = self.spr
-        eq = self.hero_equity
+    def solve(self, bet_sizes=None, iterations=1000):
+        """Build and solve the game tree."""
+        if bet_sizes is None:
+            bet_sizes = self._default_sizes()
 
-        # Plan: bet turn → river shove or bet turn → check river or check turn → bet river
-        # Simplified: geometric 2-street sizing
+        # Build tree
+        root = CFRNode(["check", "bet_small", "bet_medium", "bet_large"], player=1)
 
-        if spr > 6:
-            # Two streets: geometric sizing
-            geo = self._geo_2street()
-            bet_turn = geo
-            pot_after_turn = self.pot * (1 + 2 * geo)
-            spr_river = (self.stack - self.pot * geo) / pot_after_turn
-            bet_river = min(spr_river, 1.5)  # All-in or large on river
+        for bet_name, bet_pct in bet_sizes:
+            if bet_name == "check":
+                child = self._build_check_branch()
+            else:
+                child = self._build_bet_branch(bet_pct)
+            root.children[bet_name] = child
 
-            # EV: we get called some % on turn, then river action
-            # Simplified: EV ≈ pot-growth if equity holds
-            ev_bet_turn = self.pot * (1 + geo * 2 * eq * 0.8)  # Rough
-            ev_check_turn = self.pot * eq * 1.2  # Pot grows slower
+        # Solve
+        result = cfr(root, iterations)
+        return {
+            "strategy": {k: round(v, 4) for k, v in result.items() if v > 0.01},
+            "explanation": self._explain_strategy(result, bet_sizes),
+            "spr": round(self.spr, 1),
+            "equity": round(self.hero_equity, 3),
+        }
 
+    def _build_check_branch(self):
+        """After hero checks, villain can check or bet."""
+        node = CFRNode(["check", "bet"], player=2)
+
+        # Villain checks -> showdown
+        check_node = CFRNode([], player=0)
+        check_node.terminal_ev = (self.pot * self.hero_equity,
+                                   self.pot * (1 - self.hero_equity))
+        node.children["check"] = check_node
+
+        # Villain bets
+        bet_node = CFRNode(["call", "fold"], player=1)
+        bet_node.terminal_ev = None
+        # Hero can call or fold vs villain's bet
+        bet_pct = 0.66
+        bet_amount = self.pot * bet_pct
+        call_node = CFRNode([], player=0)
+        call_node.terminal_ev = ((self.pot + 2 * bet_amount) * self.hero_equity - bet_amount,
+                                  (self.pot + 2 * bet_amount) * (1 - self.hero_equity) - bet_amount)
+        fold_node = CFRNode([], player=0)
+        fold_node.terminal_ev = (0, self.pot)
+        bet_node.children["call"] = call_node
+        bet_node.children["fold"] = fold_node
+        node.children["bet"] = bet_node
+
+        return node
+
+    def _build_bet_branch(self, bet_pct):
+        """Hero bets, villain responds."""
+        bet_amount = self.pot * bet_pct
+        actual_bet = min(bet_amount, self.stack)
+
+        node = CFRNode(["fold", "call", "raise"], player=2)
+
+        # Fold
+        fn = CFRNode([], player=0)
+        fn.terminal_ev = (self.pot, 0)
+        node.children["fold"] = fn
+
+        # Call
+        cn = CFRNode([], player=0)
+        cn.terminal_ev = ((self.pot + 2 * actual_bet) * self.hero_equity - actual_bet,
+                           (self.pot + 2 * actual_bet) * (1 - self.hero_equity) - actual_bet)
+        node.children["call"] = cn
+
+        # Raise (simplified: all-in)
+        rn = CFRNode(["call_raise", "fold_raise"], player=1)
+        call_rn = CFRNode([], player=0)
+        all_in = self.stack
+        call_rn.terminal_ev = ((self.pot + 2 * all_in) * self.hero_equity - all_in,
+                                (self.pot + 2 * all_in) * (1 - self.hero_equity) - all_in)
+        fold_rn = CFRNode([], player=0)
+        fold_rn.terminal_ev = (0, self.pot + actual_bet)
+        rn.children["call_raise"] = call_rn
+        rn.children["fold_raise"] = fold_rn
+        node.children["raise"] = rn
+
+        return node
+
+    def _default_sizes(self):
+        if self.spr < 1:
+            return [("check", 0), ("bet_all_in", self.spr)]
+        elif self.spr < 3:
+            return [("check", 0), ("bet_small", 0.40), ("bet_large", self.spr)]
         else:
-            # Just bet geometric to all-in
-            geo = spr / 2 if spr < 4 else 0.75
-            bet_turn = geo
-            pot_after_turn = self.pot * (1 + 2 * geo)
-            spr_river = (self.stack - self.pot * geo) / pot_after_turn
-            bet_river = min(spr_river, spr_river)
+            return [("check", 0), ("bet_small", 0.33), ("bet_medium", 0.66), ("bet_large", 1.0)]
 
-            ev_bet_turn = self.pot
-            ev_check_turn = self.pot * eq
+    def _explain_strategy(self, strategy, bet_sizes):
+        """Human-readable explanation of the mixed strategy."""
+        check_pct = strategy.get("check", 0)
+        parts = []
 
-        if eq > 0.55 and ev_bet_turn > ev_check_turn:
-            return {
-                "action": "BET",
-                "turn_bet_pct": round(bet_turn, 2),
-                "river_plan_pct": round(bet_river, 2),
-                "stack_river": round(max(0, self.stack - self.pot * bet_turn), 1),
-                "reasoning": f"Plan pe 2 străzi: bet {bet_turn*100:.0f}% turn, {bet_river*100:.0f}% river",
-            }
-        elif eq < 0.30:
-            return {
-                "action": "CHECK",
-                "turn_bet_pct": 0,
-                "reasoning": "Equity prea mică pentru double barrel",
-            }
-        else:
-            return {
-                "action": "CHECK",
-                "turn_bet_pct": 0,
-                "river_plan_pct": 0.66 if eq > 0.45 else 0,
-                "reasoning": "Pot control pe turn, decide river",
-            }
+        if check_pct > 0.7:
+            parts.append(f"check {check_pct*100:.0f}% — preferă showdown")
+        elif check_pct > 0.3:
+            parts.append(f"mix echilibrat (check {check_pct*100:.0f}%)")
 
-    def _geo_2street(self):
-        """Geometric sizing for 2 streets remaining."""
-        growth_target = (self.pot + 2 * self.stack) / self.pot if self.pot > 0 else 1
-        geo = (growth_target ** 0.5 - 1) / 2
-        return min(geo, 1.5)  # Cap at 150% pot
+        for name, pct in strategy.items():
+            if name == "check":
+                continue
+            if pct > 0.15:
+                size_name = name.replace("bet_", "")
+                parts.append(f"bet {size_name} {pct*100:.0f}%")
+
+        if self.hero_equity > 0.70:
+            parts.append("— value-heavy")
+        elif self.hero_equity < 0.35:
+            parts.append("— cu bluff-uri")
+
+        return " | ".join(parts) if parts else "strategie mixtă"
