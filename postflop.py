@@ -56,7 +56,7 @@ class PostflopEngine:
 
         # Advanced board analysis
         range_adv = range_advantage(self.hero_position, self.villain_position, board_cards)
-        nut_ratio = nut_advantage(self.villain_range[:10], self.villain_range[:10], board_cards)
+        nut_ratio = nut_advantage(list(initial_range(self.hero_position))[:10], self.villain_range[:10], board_cards)
         block_boost = bluff_equity_boost(self.hero_cards, self.villain_range, board_cards)
         blockers_summary = blocker_effect_summary(self.hero_cards, self.villain_range, board_cards)
         fold_eq = self.opponent.fold_to_cbet
@@ -111,7 +111,7 @@ class PostflopEngine:
 
         spr = calculate_spr(self.stack, self.pot)
         range_adv = range_advantage(self.hero_position, self.villain_position, board_4[:3])
-        nut_ratio = nut_advantage(self.villain_range[:10], self.villain_range[:10], board_4[:3])
+        nut_ratio = nut_advantage(list(initial_range(self.hero_position))[:10], self.villain_range[:10], board_4[:3])
         block_boost = bluff_equity_boost(self.hero_cards, self.villain_range, board_4[:3])
 
         sizing_rec = recommend_sizing(flop_analysis, spr, 2, eq, range_adv,
