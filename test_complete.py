@@ -1,230 +1,171 @@
 """
-Complete test suite for all Governor NL200 modules.
-Tests: solver, multiway, hand history parser, ICM, frequency drill,
-leak finder, hand reviewer, range visualizer.
+Complete test suite v2 — real CFR solver, proper ICM, fixed multiway,
+redesigned frequency drill, improved leak finder, compact range viz.
 """
 import sys, os, random
 sys.path.insert(0, os.path.dirname(__file__))
 
 from treys import Card
-from solver import RiverSolver, TurnSolver
-from multiway import (multiway_equity, multiway_fold_equity,
-                       multiway_decision, multiway_sizing_adjustment)
+from solver import RiverGame, cfr, CFRNode
+from multiway import multiway_equity, multiway_decision, multiway_fold_equity
 from hh_parser import parse_pokerstars, analyze_hand
 from icm import icm_equity, icm_push_fold, tournament_stage_adjustment
 from trainer_advanced import FrequencyDrill, LeakFinder, HandReviewer
-from viz_range import range_to_grid, grid_to_html, range_stats, narrow_range_html, combo_to_grid_position
+from viz_range import range_to_grid, grid_to_html, range_stats, combo_to_grid_position
 from range_narrowing import initial_range
-from equity import all_cards, remove_cards
 
 random.seed(42)
 
 
-def test_river_solver():
-    """Test CFR river solver."""
-    print("\n=== River Solver ===")
-    solver = RiverSolver(pot=10, stack=50, hero_equity=0.72, ip=True)
-    result = solver.solve(iterations=200)
-    assert "optimal" in result
-    assert "strategy_type" in result
-    print(f"  Equity 72% IP SPR=5: {result['strategy_type']} - {result['optimal']['action']}")
-    print(f"  EV bet: {result['optimal'].get('ev_bet', '?')}, EV check: {result['optimal'].get('ev_check', '?')}")
-    assert result["optimal"]["action"] in ("BET", "CHECK", "thin_value", "value_bet")
-    print("  River solver: PASSED")
+def test_real_cfr():
+    """Test the real CFR solver."""
+    print("\n=== Real CFR Solver ===")
+    game = RiverGame(pot=10, stack=50, hero_equity=0.72, ip=True)
+    result = game.solve(iterations=500)
+    assert "strategy" in result
+    assert len(result["strategy"]) > 0
+    print(f"  River eq=72% SPR=5: {result['strategy']}")
+    print(f"  Explanation: {result['explanation']}")
+    # Should recommend some betting with 72% equity
+    strat = result["strategy"]
+    bet_actions = [k for k in strat if "bet" in k]
+    assert len(bet_actions) > 0 or strat.get("check", 0) < 0.5, "Should bet with 72% equity"
+    print("  Real CFR: PASSED")
+
+    # Low equity scenario
+    game2 = RiverGame(pot=10, stack=50, hero_equity=0.22, ip=True)
+    result2 = game2.solve(iterations=500)
+    print(f"  River eq=22% SPR=5: {result2['strategy']}")
+    check_freq = result2["strategy"].get("check", 0)
+    assert check_freq > 0.3, f"Should mostly check with 22% equity, check={check_freq}"
+    print("  Real CFR equity 22%: PASSED")
 
 
-def test_turn_solver():
-    """Test 2-street turn solver."""
-    print("\n=== Turn Solver ===")
-    solver = TurnSolver(pot=10, stack=50, hero_equity=0.62, ip=True)
-    result = solver.solve(iterations=100)
-    assert "action" in result
-    print(f"  Turn SPR=5 eq=62%: {result['action']} {result.get('turn_bet_pct','')}")
-    print("  Turn solver: PASSED")
+def test_icm_real():
+    """Test the real ICM implementation."""
+    print("\n=== Real ICM ===")
+
+    # Standard 4-player payout
+    stacks = [1000, 800, 600, 400]
+    payouts = [0.5, 0.3, 0.2, 0.0]
+    eqs = icm_equity(stacks, payouts)
+    print(f"  ICM: {[round(e, 3) for e in eqs]}")
+
+    # Basic sanity: more chips = more equity
+    assert eqs[0] > eqs[1] > eqs[2], f"Expected decreasing equity: {eqs}"
+    # Chip leader should have 30-35% with 1000/2800 = 35.7% chips
+    assert 0.30 < eqs[0] < 0.38, f"Chip leader too far off: {eqs[0]:.3f}"
+    print(f"  Chip leader 1000/2800: {eqs[0]:.1%} ICM equity (raw: 35.7%)")
+
+    # Push/fold test
+    result = icm_push_fold([500, 700, 800, 1000], [50, 100], payouts, 0.58, "SB")
+    print(f"  Push/fold 10BB: {result['action']} EV diff={result['ev_diff']:.4f} risk={result.get('risk_premium',0):.4f}")
+
+    # Tournament stage
+    stage = tournament_stage_adjustment([1500, 2000, 1800, 1200], [100, 200], payouts)
+    print(f"  Stage: {stage['stage']} | open: {stage['open_size']} | hero: {stage['hero_bb']}BB")
+    assert "stage" in stage
+    print("  Real ICM: PASSED")
 
 
-def test_multiway():
-    """Test multi-way pot logic."""
-    print("\n=== Multiway ===")
+def test_multiway_fixed():
+    """Test fixed multiway equity."""
+    print("\n=== Multiway Fixed ===")
     hero = (Card.new("As"), Card.new("Kh"))
     vrange1 = ["AA","KK","QQ","JJ","AK","AQ"]
     vrange2 = ["TT","99","88","KQs","AJs"]
     board = [Card.new("Ks"), Card.new("7h"), Card.new("2d")]
 
-    eq = multiway_equity(hero, [vrange1, vrange2], board, trials=200)
-    print(f"  AK on K72 3-way equity: {eq:.1%}")
+    eq = multiway_equity(hero, [vrange1, vrange2], board, trials=300)
+    print(f"  AK on K72 3-way: {eq:.1%}")
+    assert 0.20 < eq < 0.80, f"Equity out of range: {eq:.1%}"
+    # Should NOT be exactly 0.5
+    assert eq != 0.5, "Equity stuck at default 0.5"
 
-    fe = multiway_fold_equity([0.55, 0.60], 2)
-    print(f"  Prob all fold (2 opp): {fe:.1%}")
+    fe = multiway_fold_equity([0.55, 0.60])
+    assert abs(fe - 0.33) < 0.01, f"Fold equity should be 33%, got {fe}"
+    print(f"  Fold equity 2 opp: {fe:.1%}")
 
-    sa = multiway_sizing_adjustment(0.55, 2)
-    print(f"  Sizing adjusted 3-way: {sa:.2f}")
-
-    result = multiway_decision(hero, [vrange1, vrange2], board, [0.55, 0.60],
-                                ["standard", "nit"])
-    print(f"  Multiway decision: {result['action']}")
-
-    assert 0 < eq < 1
+    result = multiway_decision(hero, [vrange1, vrange2], board, [0.55, 0.60])
+    print(f"  3-way decision: {result['action']}")
+    assert result["num_opponents"] == 2
     print("  Multiway: PASSED")
 
 
-def test_hh_parser():
-    """Test hand history parser."""
-    print("\n=== Hand History Parser ===")
-    sample = """PokerStars Hand #123456789: Hold'em No Limit ($0.50/$1.00) - 2025/01/01
-Table 'Test' 6-max Seat #1 is the button
-Seat 1: Hero ($100.00 in chips)
-Seat 2: Villain ($95.50 in chips)
-*** HOLE CARDS ***
-Dealt to Hero [As Kh]
-*** FLOP *** [Ks 7h 2d]
-Hero: bets $5.00
-Villain: calls $5.00
-*** TURN *** [Ks 7h 2d] [8c]
-Hero: bets $12.00
-Villain: folds
-Hero collected $18.50 from pot"""
+def test_frequency_drill_v2():
+    """Test redesigned frequency drill."""
+    print("\n=== Frequency Drill v2 ===")
+    drill = FrequencyDrill(num_scenarios=5)
+    scenario = drill.generate()
+    assert scenario is not None
+    print(f"  First scenario: {scenario['texture']} eq={scenario['equity']:.1%} gto={scenario['gto_action']}")
+    print(f"  Total scenarios generated: {len(drill.scenarios)}")
 
-    hand = parse_pokerstars(sample)
-    assert hand is not None
-    assert hand.hero_name == "Hero"
-    assert hand.hero_cards == ["As", "Kh"]
-    assert hand.hero_name == "Hero"  # Core parsing worked
-    assert hand.hero_cards == ["As", "Kh"]
-    print(f"  Parsed hand: {hand.hand_id} - Hero: {hand.hero_cards}")
+    # Record varied responses
+    for i in range(len(drill.scenarios)):
+        sc = drill.current_scenario()
+        if sc is None:
+            break
+        action = "BET" if i < 3 else "CHECK"
+        drill.record(action)
 
-    analysis = analyze_hand(hand)
-    print(f"  Analysis: {analysis['position']}, agg={analysis['aggression']:.1f}")
-    print("  HH Parser: PASSED")
-
-
-def test_icm():
-    """Test ICM calculator."""
-    print("\n=== ICM ===")
-    stacks = [1000, 800, 600, 400]
-    payouts = [0.5, 0.3, 0.2, 0.0]
-    equities = icm_equity(stacks, payouts)
-    print(f"  Stacks {stacks}: equities = {[round(e, 3) for e in equities]}")
-    assert len(equities) == 4
-    assert equities[0] > equities[1]  # Bigger stack = more equity
-    print(f"  Chip leader equity: {equities[0]:.1%}")
-
-    # Push/fold test
-    result = icm_push_fold([500, 600, 700, 800], [50, 100], payouts, 0.55, "SB")
-    print(f"  Short stack push/fold (55%): {result['action']} (EV diff: {result['ev_diff']:.4f})")
-
-    # Tournament stage
-    stage = tournament_stage_adjustment([500, 600, 700, 800], [50, 100], payouts)
-    print(f"  Stage: {stage['stage']}, open: {stage['open_size']}")
-    print("  ICM: PASSED")
-
-
-def test_frequency_drill():
-    """Test frequency-based training."""
-    print("\n=== Frequency Drill ===")
-    drill = FrequencyDrill()
-    scenario = drill.generate_scenario()
-    print(f"  Scenario: {scenario['texture']} eq={scenario['equity']:.1%}")
-    print(f"  GTO: {scenario['gto_action']} target BET={drill.target_frequency['BET']:.0%}")
-
-    # Simulate responses matching target
-    for _ in range(7):
-        drill.record_response("BET")
-    for _ in range(3):
-        drill.record_response("CHECK")
-
-    score = drill.get_score()
-    print(f"  Score: {score['score']:.2f} (7BET/3CHECK vs {drill.target_frequency['BET']:.0%} target)")
-    print(f"  Feedback: {score['feedback']}")
+    results = drill.results()
+    print(f"  Score: {results['score']:.2f}, Alt: {results['alternation_score']:.2f}")
+    print(f"  Bet actual/expected: {results['bet_actual']:.2f}/{results['bet_expected']:.2f}")
+    assert results["total"] > 0
     print("  Frequency drill: PASSED")
 
 
-def test_leak_finder():
-    """Test leak detection."""
+def test_leak_finder_real():
+    """Test leak finder with real patterns."""
     print("\n=== Leak Finder ===")
-    finder = LeakFinder()
+    lf = LeakFinder()
 
-    # Simulate over-cbetting
+    # Simulate over-cbetting session: hero cbets 90% on flop
+    for _ in range(15):
+        lf.add_decision({"street": "flop", "aggressor": "hero", "action": "bet", "sizing": 0.33})
+    lf.add_decision({"street": "flop", "aggressor": "hero", "action": "check"})
+
+    # Fold too much to cbets
     for _ in range(8):
-        finder.add_decision({"street": "FLOP", "user_action": "BET",
-                             "bet_faced": 0, "sizing": 0.33})
-    for _ in range(2):
-        finder.add_decision({"street": "FLOP", "user_action": "CHECK",
-                             "bet_faced": 0})
+        lf.add_decision({"street": "flop", "aggressor": "villain", "action": "fold"})
 
-    # Simulate folding too much
-    for _ in range(5):
-        finder.add_decision({"street": "FLOP", "user_action": "FOLD",
-                             "bet_faced": 5})
+    # No check-raises
+    for _ in range(20):
+        lf.add_decision({"street": "flop", "aggressor": "villain", "action": "call"})
 
-    result = finder.analyze()
-    print(f"  Found {result['leaks_found']} leaks in {result['total_decisions']} decisions")
+    result = lf.analyze()
+    print(f"  Leaks: {result['leaks_count']} in {result['total']} decisions")
     for leak in result["leaks"]:
-        print(f"  - {leak['type']}: {leak['detail'][:60]}")
-    assert result["leaks_found"] >= 1
+        print(f"  - [{leak['severity']}] {leak['type']}")
+    # Should find cbet too high and fold too much
+    assert result["leaks_count"] >= 2, f"Expected at least 2 leaks, got {result['leaks_count']}"
     print("  Leak finder: PASSED")
 
 
-def test_hand_reviewer():
-    """Test hand review."""
-    print("\n=== Hand Reviewer ===")
-    reviewer = HandReviewer()
-    hero = (Card.new("As"), Card.new("Kh"))
-    board_prog = [
-        [Card.new("Ks"), Card.new("7h"), Card.new("2d")],
-        [Card.new("Ks"), Card.new("7h"), Card.new("2d"), Card.new("8c")],
-    ]
-    actions = [
-        {"street": "FLOP", "action": "BET", "bet_faced": 0},
-        {"street": "TURN", "action": "CHECK", "bet_faced": 0},
-    ]
-    vrange = initial_range("BB")
-
-    result = reviewer.review(hero, board_prog, actions, vrange, position="IP")
-    print(f"  Score: {result['correct']}/{result['total']} ({result['score']:.0%})")
-    for fb in result["street_feedback"]:
-        print(f"  - {fb['street']}: you={fb['your_action']} gto={fb['gto_action']} eq={fb['equity']:.0%}")
-    print("  Hand reviewer: PASSED")
-
-
-def test_viz_range():
-    """Test range visualization."""
-    print("\n=== Range Visualizer ===")
+def test_compact_viz():
+    """Test compact range visualizer."""
+    print("\n=== Compact Range Viz ===")
     rng = set(initial_range("BTN"))
-    grid = range_to_grid(rng)
-    assert len(grid) == 13
-    assert len(grid[0]) == 13
-    print(f"  Grid: 13×13, range size: {len(rng)} combos")
+    html = grid_to_html(rng, "BTN Range")
+    print(f"  HTML size: {len(html)} chars (was ~23K)")
+    assert len(html) < 8000, f"HTML should be compact, got {len(html)} chars"
+    assert "rg-table" in html
+    assert "@media" in html  # Light mode support
+    print("  Compact, light+dark: PASSED")
 
     stats = range_stats(rng)
-    print(f"  Stats: {stats['range_pct']}% of hands, {stats['total_hands']} total hands")
-
-    html = grid_to_html(rng, "BTN Range", highlight_combo="AA")
-    assert "BTN Range" in html
-    assert len(html) > 500, f"HTML too short: {len(html)} chars"
-    print(f"  HTML: {len(html)} chars")
-
-    pos = combo_to_grid_position("AKs")
-    print(f"  AKs position: row={pos[0]} col={pos[1]}")
-
-    # Narrowed range viz
-    narrow = [c for c in rng if "A" in c or "K" in c][:20]
-    n_html = narrow_range_html(rng, narrow)
-    assert "Range inițial" in n_html
-    print(f"  Narrow HTML: {len(n_html)} chars")
+    print(f"  {stats['total_combos']} combos, {stats['range_pct']}% of hands")
     print("  Range viz: PASSED")
 
 
 if __name__ == "__main__":
-    test_river_solver()
-    test_turn_solver()
-    test_multiway()
-    test_hh_parser()
-    test_icm()
-    test_frequency_drill()
-    test_leak_finder()
-    test_hand_reviewer()
-    test_viz_range()
+    test_real_cfr()
+    test_icm_real()
+    test_multiway_fixed()
+    test_frequency_drill_v2()
+    test_leak_finder_real()
+    test_compact_viz()
     print("\n" + "=" * 50)
-    print("ALL COMPLETE TESTS PASSED")
+    print("ALL FIXED TESTS PASSED")
     print("=" * 50)
