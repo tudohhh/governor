@@ -24,36 +24,98 @@ from typing import List, Tuple, Optional, Dict
 # 1. LOG-NORMAL TIMING
 # ═══════════════════════════════════════════════════════════════
 
+class SpotComplexity:
+    """
+    Quantifies how "hard" a poker decision is — the key feature that
+    makes human timing correlate with game state. A bot that takes the
+    same time on trivial folds and complex river bluffs is detectable.
+    """
+
+    @staticmethod
+    def compute(street: str, pot_bb: float = 10, stack_bb: float = 100,
+                bet_faced_bb: float = 0, n_actions: int = 2,
+                is_all_in: bool = False,
+                is_last_to_act: bool = False) -> float:
+        """
+        Returns complexity 0.0 (trivial) to 1.0 (extremely hard).
+
+        Factors:
+          - Street weight: preflop is simplest, river is hardest
+          - Pot size: bigger pot relative to stack = more at stake
+          - Bet faced vs pot: closer to pot-odds threshold = harder call
+          - Number of viable actions: more options = more thinking
+          - All-in decisions: binary but high-stakes = moderate complexity
+          - Position: last to act has more info = slightly easier
+        """
+        # Base: street weight
+        street_w = {'preflop': 0.30, 'flop': 0.50, 'turn': 0.75, 'river': 1.0}
+        base = street_w.get(street, 0.5)
+
+        # Pot size factor: bigger SPR decisions are harder
+        spr = pot_bb / max(1, stack_bb) if stack_bb > 0 else 0
+        pot_factor = min(1.0, spr * 2.5)  # saturates at 40% SPR
+
+        # Bet faced: decisions near pot-odds threshold are hardest
+        if bet_faced_bb > 0 and pot_bb > 0:
+            odds = bet_faced_bb / (pot_bb + 2 * bet_faced_bb)
+            # Peak complexity at ~25-40% equity needed (marginal decisions)
+            distance_from_marginal = abs(odds - 0.33)
+            bet_factor = max(0, 1.0 - distance_from_marginal * 3)
+        else:
+            bet_factor = 0.0  # no bet to face = aggressive action, moderate
+
+        # Action count: more viable lines = harder
+        action_factor = min(1.0, (n_actions - 1) / 4.0)  # 2→0.25, 5→1.0
+
+        # All-in: binary but weighty
+        allin_bonus = 0.15 if is_all_in else 0.0
+
+        # Last to act: slightly easier (more info)
+        position_discount = 0.85 if is_last_to_act else 1.0
+
+        # Combine: base sets floor, factors modulate
+        raw = (base * 0.35 + pot_factor * 0.20 + bet_factor * 0.25 +
+               action_factor * 0.15 + allin_bonus)
+        raw *= position_discount
+
+        return round(min(1.0, max(0.05, raw)), 3)
+
+
 class LogNormalTimer:
     """
-    Human-like timing using log-normal distribution.
-    Humans do NOT have uniform reaction times. Distribution is
-    log-normal: peak near the minimum, long tail to the right
-    (some decisions take much longer).
+    Human-like timing using log-normal distribution, CORRELATED with
+    spot complexity. This is the key anti-detection feature: timing
+    that varies with game-state difficulty.
     """
 
     def __init__(self):
         self._history = deque(maxlen=50)
         self._session_start = time.time()
-        # Calibrated from real player data (seconds)
+        self._complexity = SpotComplexity()
+        # Base params (mu, sigma) for lognorm at complexity=0.5
         self._params = {
-            'preflop_fold':  (0.4, 0.6),   # (mu, sigma) for lognorm
+            'preflop_fold':  (0.4, 0.6),
             'preflop_raise': (0.8, 0.5),
             'flop_action':   (1.2, 0.5),
             'turn_action':   (1.5, 0.5),
             'river_action':  (1.8, 0.6),
-            'click_hold':    (0.06, 0.02),  # these stay uniform (too fast for lognorm)
+            'click_hold':    (0.06, 0.02),
             'gap_between':   (0.3, 0.3),
         }
 
-    def human_delay(self, action_type: str) -> float:
-        """Generate a human-like delay using log-normal distribution."""
+    def human_delay(self, action_type: str, complexity: float = 0.5) -> float:
+        """Generate a human-like delay. Complexity scales mu up/down."""
         mu, sigma = self._params.get(action_type, (1.0, 0.5))
+
+        # Complexity scaling: at complexity=0.0, mu*0.4 (fast).
+        # At complexity=1.0, mu*2.5 (slow). At 0.5, mu*1.0 (baseline).
+        complexity_scale = 0.4 + complexity * 2.1  # 0.4 → 2.5
 
         # Session fatigue: after 2h, mu increases 15%
         session_h = (time.time() - self._session_start) / 3600
         fatigue = 1.0 + max(0, (session_h - 2.0)) * 0.15
-        mu_adj = mu * fatigue
+
+        mu_adj = mu * complexity_scale * fatigue
 
         # Generate log-normal value
         t = random.lognormvariate(mu_adj, sigma)
@@ -70,21 +132,32 @@ class LogNormalTimer:
         time.sleep(t)
         return t
 
-    def decision_delay(self, street: str, action_is_fold: bool = False) -> float:
+    def decision_delay(self, street: str, action_is_fold: bool = False,
+                       pot_bb: float = 10, stack_bb: float = 100,
+                       bet_faced_bb: float = 0, n_actions: int = 2,
+                       is_all_in: bool = False,
+                       is_last_to_act: bool = False) -> float:
         """
-        Get street-appropriate delay.
-        Folds are faster, raises/bets take longer to decide.
+        Get street-appropriate delay, scaled by spot complexity.
+        Folds are faster, raises/bets take longer, and complex spots
+        take proportionally more time — exactly the correlation that
+        defeats detector behavioral models.
         """
+        cx = self._complexity.compute(
+            street, pot_bb, stack_bb, bet_faced_bb,
+            n_actions, is_all_in, is_last_to_act
+        )
+
         if street == 'preflop':
             return self.human_delay(
-                'preflop_fold' if action_is_fold else 'preflop_raise')
+                'preflop_fold' if action_is_fold else 'preflop_raise', cx)
         elif street == 'flop':
-            return self.human_delay('flop_action')
+            return self.human_delay('flop_action', cx)
         elif street == 'turn':
-            return self.human_delay('turn_action')
+            return self.human_delay('turn_action', cx)
         elif street == 'river':
-            return self.human_delay('river_action')
-        return 1.5  # fallback
+            return self.human_delay('river_action', cx)
+        return self.human_delay('flop_action', cx)
 
 
 # ═══════════════════════════════════════════════════════════════
