@@ -16,9 +16,10 @@ violates Terms of Service and may result in account closure
 and fund confiscation.
 """
 from .stealth import BezierMouse, HumanTimer, TimingProfile, BetSizingStealth, PatternAvoidance
-from .evasion import (EvasionEngine, BehavioralEvasion, TemporalEvasion,
-                       SpatialEvasion, BetSizingEvasion, MultiTableCoordinator,
-                       ProcessCamouflage, PROFILES)
+from .evasion import (EvasionEngine, LogNormalTimer, IdleBehaviorSimulator,
+                       EmotionalState, MicroCorrectionMouse, HumanMistakeSimulator,
+                       ProfileRotator, SessionPatternGenerator, TrafficSimulator,
+                       FingerprintRotator, SESSION_PROFILES, HARDWARE_SEPARATION_GUIDE)
 from .table_reader import TableReader, TableConfig, GameState, Street
 from .executor import ActionExecutor
 from .bot_core import PokerBot, main
