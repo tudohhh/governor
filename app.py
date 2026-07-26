@@ -225,8 +225,14 @@ def main():
         st.session_state.postflop_correct = 0
     if "postflop_total" not in st.session_state:
         st.session_state.postflop_total = 0
+    if "sparring_hand" not in st.session_state:
+        st.session_state.sparring_hand = None
+    if "sparring_street" not in st.session_state:
+        st.session_state.sparring_street = "FLOP"
+    if "sparring_score" not in st.session_state:
+        st.session_state.sparring_score = {"correct": 0, "total": 0}
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Analiza Mana", "Range Viewer", "Drill Preflop", "Drill Postflop", "Referinta"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Analiza Mana", "Range Viewer", "Drill Preflop", "Drill Postflop", "Sparring NL100", "Referinta"])
 
     with tab1:
         col1, col2 = st.columns([1, 2])
@@ -501,6 +507,132 @@ def main():
             st.rerun()
 
     with tab5:
+        st.subheader("♠ Sparring NL100 — Mână completă")
+        st.caption("Simulează o mână întreagă: preflop → flop → turn → river. Engine-ul decide GTO.")
+
+        col_s1, col_s2 = st.columns([1, 2])
+
+        with col_s1:
+            hero_pos = st.selectbox("Poziția ta", ["UTG","HJ","CO","BTN","SB","BB"], index=3, key="sp_pos")
+            vill_pos = st.selectbox("Poziția villain", ["UTG","HJ","CO","BTN","SB","BB"], index=5, key="sp_vpos")
+            opp_type = st.selectbox("Profil adversar", ["standard","nit","lag","fish","maniac"], key="sp_opp")
+            stack_size = st.slider("Stack (BB)", 50, 200, 100, key="sp_stack")
+
+            if st.button("🔄 Mână nouă", type="primary", use_container_width=True, key="sp_new"):
+                random.seed()
+                deck = all_cards()
+                random.shuffle(deck)
+                hero = (deck[0], deck[1])
+                dead = list(hero)
+                remaining = remove_cards(deck, dead)
+                board = remaining[:3]
+
+                # Determine position
+                pos_order = ["UTG","HJ","CO","BTN","SB","BB"]
+                hero_ip = pos_order.index(hero_pos) > pos_order.index(vill_pos)
+                position = "IP" if hero_ip else "OOP"
+
+                from range_narrowing import initial_range
+                vrange = initial_range(vill_pos)
+
+                engine = PostflopEngine(
+                    hero, vrange, position=position,
+                    opponent_type=opp_type, stack=stack_size, pot=7.5,
+                    hero_position=hero_pos, villain_position=vill_pos,
+                )
+
+                flop_result = engine.decide_flop(board)
+
+                st.session_state.sparring_hand = {
+                    "hero": hero,
+                    "board_flop": board,
+                    "vrange": vrange,
+                    "position": position,
+                    "opponent": opp_type,
+                    "engine": engine,
+                    "flop_result": flop_result,
+                    "turn_board": None,
+                    "river_board": None,
+                    "turn_result": None,
+                    "river_result": None,
+                }
+                st.session_state.sparring_street = "FLOP"
+                st.rerun()
+
+        with col_s2:
+            sh = st.session_state.sparring_hand
+            if sh:
+                hero_str = " ".join(Card.int_to_pretty_str(c) for c in sh["hero"])
+                board_str = " ".join(Card.int_to_pretty_str(c) for c in sh["board_flop"])
+                st.markdown(f"### 🤚 {hero_str}")
+                st.markdown(f"### 📋 Flop: {board_str}")
+                st.caption(f"Poziție: **{sh['position']}** ({sh.get('hero_position','BTN')} vs {sh.get('villain_position','BB')}) | "
+                          f"Adversar: **{sh['opponent']}** | Stack: {stack_size}BB")
+
+                fr = sh["flop_result"]
+                st.info(f"Board: **{fr['texture']}** | Equity: **{fr['equity_str']}** | "
+                       f"Range adv: **{fr.get('range_advantage','?')}** | "
+                       f"Blocanți: **{fr.get('blockers','?')}**")
+
+                st.progress(fr["equity"], text=f"Equity vs range: {fr['equity_str']}")
+
+                st.markdown("#### Acțiune GTO recomandată:")
+                action_color = {"BET": "green", "CHECK": "orange", "RAISE": "red", "CALL": "blue", "FOLD": "gray"}
+                color = action_color.get(fr["action"], "black")
+                st.markdown(f"**:{color}[{fr['action']}]** {fr.get('sizing_bb', '')}BB — *{fr['reasoning']}*")
+
+                if sh["flop_result"]["action"] in ("BET", "CHECK"):
+                    if st.button("▶️ Continuă pe Turn", key="sp_turn"):
+                        engine = sh["engine"]
+                        board_4 = list(sh["board_flop"])
+                        remaining2 = remove_cards(all_cards(), list(sh["hero"]) + board_4)
+                        turn_card = random.choice(remaining2)
+                        board_4.append(turn_card)
+                        turn_result = engine.decide_turn(board_4, flop_action=fr["action"])
+                        sh["turn_board"] = board_4
+                        sh["turn_result"] = turn_result
+                        st.session_state.sparring_street = "TURN"
+                        st.rerun()
+
+                # Show turn results
+                if sh.get("turn_result"):
+                    tr = sh["turn_result"]
+                    turn_card_str = Card.int_to_pretty_str(sh["turn_board"][-1])
+                    st.markdown("---")
+                    st.markdown(f"### 🂭 Turn: {turn_card_str}")
+                    st.progress(tr["equity"], text=f"Equity: {tr['equity_str']}")
+                    scare = "⚠️ Scare card! " if tr.get("scare_card") else ""
+                    st.markdown(f"**:{color}[{tr['action']}]** — {scare}{tr.get('reasoning','')}")
+
+                    if tr["action"] in ("BET", "CHECK"):
+                        if st.button("▶️ Continuă pe River", key="sp_river"):
+                            engine = sh["engine"]
+                            board_5 = list(sh["turn_board"])
+                            remaining3 = remove_cards(all_cards(), list(sh["hero"]) + board_5)
+                            river_card = random.choice(remaining3)
+                            board_5.append(river_card)
+                            river_result = engine.decide_river(board_5, action_history=[
+                                sh["flop_result"]["action"], tr.get("action","CHECK")
+                            ])
+                            sh["river_board"] = board_5
+                            sh["river_result"] = river_result
+                            st.session_state.sparring_street = "RIVER"
+                            st.rerun()
+
+                # Show river
+                if sh.get("river_result"):
+                    rr = sh["river_result"]
+                    river_card_str = Card.int_to_pretty_str(sh["river_board"][-1])
+                    st.markdown("---")
+                    st.markdown(f"### 🂭 River: {river_card_str}")
+                    st.progress(rr["equity"], text=f"Equity: {rr['equity_str']}")
+                    st.markdown(f"**:{color}[{rr['action']}]** — {rr.get('reasoning','')}")
+                    if "villain_distribution" in rr:
+                        vd = rr["villain_distribution"]
+                        st.caption(f"Range villain: strong={vd['strong']}% medium={vd['medium']}% weak={vd['weak']}% | "
+                                  f"Range rămas: {rr.get('range_narrowed','?')} combos")
+
+    with tab6:
         st.subheader("Referinta Rapida")
         st.markdown("""
 **Notatie carti:**
