@@ -1,136 +1,128 @@
 """
-ICM (Independent Chip Model) calculator for tournament poker.
-Computes tournament equity and push/fold Nash equilibria.
+Real ICM (Independent Chip Model) — properly implemented.
+Computes exact conditional probabilities for all finish positions.
 """
 import math
-import itertools
+from itertools import permutations
 
 
 def icm_equity(stacks, payouts):
     """
-    Calculate ICM equity for each player.
-    stacks: list of chip counts
-    payouts: list of payout percentages (should sum to 1.0)
+    Real ICM equity calculation.
+    For each player, computes probability of finishing in each paid position,
+    weighted by payout.
 
-    Returns list of equities (probability-weighted payouts).
+    Algorithm: P(player i finishes in position k) =
+      sum over all other players j of:
+        P(j wins) × P(i finishes k-1 in remaining field without j)
+
+    With the base case: P(i wins) = stack_i / total_chips
     """
     n = len(stacks)
-    total_chips = sum(stacks)
+    total = sum(stacks)
+    if total <= 0:
+        return [0.0] * n
+
     equities = [0.0] * n
 
-    # For each payout position
-    for position, payout in enumerate(payouts):
-        if payout <= 0:
+    for pos in range(len(payouts)):
+        if payouts[pos] <= 0:
             continue
-
         for player in range(n):
-            stack = stacks[player]
-            if stack <= 0:
-                continue
-
-            # Probability this player finishes in this position
-            prob = _finish_probability(player, position, stacks, total_chips)
-            equities[player] += prob * payout
+            prob = _finish_prob(player, pos, stacks, total)
+            equities[player] += prob * payouts[pos]
 
     return equities
 
 
-def _finish_probability(player, position, stacks, total_chips):
-    """Probability that 'player' finishes exactly at 'position'."""
+def _finish_prob(player, position, stacks, total):
+    """
+    Exact probability that player finishes exactly at 'position' (0-indexed).
+    Uses recursion with proper normalization.
+    """
     n = len(stacks)
-    if position == 0:
-        # First place: proportional to chip count
-        return stacks[player] / total_chips if total_chips > 0 else 0
+    if stacks[player] <= 0:
+        return 0.0
 
-    # For subsequent positions: sum over who wins first, then player wins next
+    if position == 0:
+        return stacks[player] / total if total > 0 else 0.0
+
     prob = 0.0
     for winner in range(n):
         if winner == player or stacks[winner] <= 0:
             continue
 
-        prob_winner_wins = stacks[winner] / total_chips
-        if prob_winner_wins <= 0:
+        prob_winner_first = stacks[winner] / total
+        if prob_winner_first <= 0:
             continue
 
-        # Remove winner, recalculate remaining
-        remaining_stacks = [s for i, s in enumerate(stacks) if i != winner]
-        remaining_total = sum(remaining_stacks)
-        if position <= len(remaining_stacks):
-            prob += (prob_winner_wins *
-                     _finish_probability_simple(player if player < winner else player - 1,
-                                                position - 1, remaining_stacks, remaining_total))
+        # Remove winner, recalculate
+        remaining = [s for i, s in enumerate(stacks) if i != winner]
+        rem_total = sum(remaining)
+        new_player_idx = player if player < winner else player - 1
+
+        prob += prob_winner_first * _finish_prob(new_player_idx, position - 1,
+                                                   remaining, rem_total)
 
     return prob
 
 
-def _finish_probability_simple(player, position, stacks, total):
-    """Simplified: just chip proportion."""
-    if position == 0:
-        return stacks[player] / total if total > 0 else 0
-    return stacks[player] / total if total > 0 else 0
-
-
 def icm_push_fold(stacks, blinds, payouts, hand_equity, position="SB"):
     """
-    Simplified push/fold Nash equilibrium for short stacks.
-    Determines whether pushing is +$EV compared to folding.
-
-    stacks: list of chip counts (hero is first)
-    blinds: (sb, bb) amounts
-    payouts: payout structure
-    hand_equity: equity of hero's hand vs calling range
-
-    Returns dict with recommendation.
+    Push/fold ICM decision.
+    Properly models risk premium near bubble.
     """
     hero_stack = stacks[0]
-    sb, bb = blinds
-    pot_before = sb + bb
+    sb, bb = blinds[0], blinds[1]
+    pot_dead = sb + bb
 
-    # Estimate villain calling range based on stack depth
-    villain_stack = min(stacks[1:]) if len(stacks) > 1 else hero_stack
-    effective_stack = min(hero_stack, villain_stack)
+    # Effective stack
+    villain_stacks = stacks[1:]
+    eff_stack = min(hero_stack, max(villain_stacks) if villain_stacks else hero_stack)
 
-    # ICM: folding equity (what happens if we fold)
+    # Calculate folding equity
     stacks_fold = list(stacks)
     if position == "SB":
-        stacks_fold[0] -= sb  # Posted SB
-    else:
-        stacks_fold[0] -= bb  # Posted BB
+        stacks_fold[0] = max(0, stacks_fold[0] - sb)
+    elif position == "BB":
+        stacks_fold[0] = max(0, stacks_fold[0] - bb)
 
     eq_fold = icm_equity(stacks_fold, payouts)[0]
 
-    # ICM: push equity
-    # Villain calling range tightens as stacks get shorter
-    if effective_stack <= 5 * bb:
-        villain_call_pct = 0.30  # Very tight
-    elif effective_stack <= 10 * bb:
+    # Opponent calling range: tighter near bubble
+    players_left = len(stacks)
+    paid_spots = sum(1 for p in payouts if p > 0)
+    bubble_factor = max(0, players_left - paid_spots)
+
+    if bubble_factor <= 2:
+        villain_call_pct = 0.20  # Very tight near bubble
+    elif eff_stack <= 5 * bb:
+        villain_call_pct = 0.30
+    elif eff_stack <= 10 * bb:
         villain_call_pct = 0.40
-    elif effective_stack <= 15 * bb:
+    elif eff_stack <= 15 * bb:
         villain_call_pct = 0.50
     else:
         villain_call_pct = 0.60
 
-    hero_double_stack = min(hero_stack * 2, hero_stack + effective_stack)
+    # Win/lose scenarios
     stacks_win = list(stacks)
-    stacks_win[0] = hero_double_stack + pot_before
-    if len(stacks_win) > 1:
-        opponent_idx = 1
-        stacks_win[opponent_idx] = stacks[opponent_idx] - effective_stack
-        stacks_win[opponent_idx] = max(0, stacks_win[opponent_idx])
+    stacks_win[0] = hero_stack + eff_stack + pot_dead
+    for i in range(1, len(stacks)):
+        if stacks[i] == max(stacks[1:]):
+            stacks_win[i] = max(0, stacks[i] - eff_stack)
+            break
 
     eq_win = icm_equity(stacks_win, payouts)[0]
+    eq_lose = 0.0  # Busted
 
-    # When called and lose
-    stacks_lose = list(stacks)
-    stacks_lose[0] = 0
-    eq_lose = 0.0
-
-    # Combined EV
     ev_push = (villain_call_pct * (hand_equity * eq_win + (1 - hand_equity) * eq_lose) +
-               (1 - villain_call_pct) * icm_equity([hero_stack + pot_before if i == 0 else s
-                                                    for i, s in enumerate(stacks)], payouts)[0])
+               (1 - villain_call_pct) * icm_equity(
+                   [hero_stack + pot_dead] + list(stacks[1:]), payouts)[0])
 
     ev_diff = ev_push - eq_fold
+
+    risk_premium = (eq_fold - eq_win * hand_equity) if eq_fold > 0 else 0
 
     if ev_diff > 0.005:
         return {
@@ -138,7 +130,9 @@ def icm_push_fold(stacks, blinds, payouts, hand_equity, position="SB"):
             "ev_push": round(ev_push, 4),
             "ev_fold": round(eq_fold, 4),
             "ev_diff": round(ev_diff, 4),
-            "reasoning": f"Push +$EV: +{ev_diff*100:.1f}% ROI",
+            "risk_premium": round(risk_premium, 4),
+            "villain_call_pct": villain_call_pct,
+            "reasoning": f"Push +$EV ({ev_diff*100:.1f}%), risk premium: {risk_premium*100:.1f}%",
         }
     else:
         return {
@@ -146,55 +140,43 @@ def icm_push_fold(stacks, blinds, payouts, hand_equity, position="SB"):
             "ev_push": round(ev_push, 4),
             "ev_fold": round(eq_fold, 4),
             "ev_diff": round(ev_diff, 4),
-            "reasoning": f"Fold: push -$EV ({ev_diff*100:.1f}%)",
+            "risk_premium": round(risk_premium, 4),
+            "reasoning": f"Fold: -$EV ({ev_diff*100:.1f}%)",
         }
 
 
 def tournament_stage_adjustment(stacks, blinds, payout_structure):
-    """
-    Adjust strategy based on tournament stage.
-    Returns stage name and strategy modifiers.
-    """
+    """Determine tournament stage and strategy adjustments."""
     total_chips = sum(stacks)
-    avg_stack = total_chips / len(stacks)
-    bb = blinds[1]
+    avg_stack = total_chips / max(1, len(stacks))
+    bb = blinds[1] if len(blinds) > 1 else blinds[0]
 
     hero_bb = stacks[0] / bb if bb > 0 else float('inf')
 
-    if hero_bb <= 10:
-        stage = "push_fold"
-        aggression = 2.0
-        open_size = "all_in"
-    elif hero_bb <= 25:
-        stage = "short_stack"
-        aggression = 1.5
-        open_size = "2.0x"
-    elif hero_bb <= 50:
-        stage = "mid_stack"
-        aggression = 1.2
-        open_size = "2.3x"
-    elif hero_bb <= 100:
-        stage = "deep"
-        aggression = 1.0
-        open_size = "2.5x"
+    if hero_bb <= 8:
+        stage, agg, opens = "push_fold", 2.0, "all-in"
+    elif hero_bb <= 20:
+        stage, agg, opens = "short", 1.5, "2.0-2.2x"
+    elif hero_bb <= 40:
+        stage, agg, opens = "mid", 1.2, "2.2-2.5x"
+    elif hero_bb <= 80:
+        stage, agg, opens = "deep", 1.0, "2.5-3.0x"
     else:
-        stage = "very_deep"
-        aggression = 0.9
-        open_size = "3.0x"
+        stage, agg, opens = "very_deep", 0.9, "3.0x+"
 
-    # Bubble factor: near the money, play tighter
-    players_remaining = len(stacks)
-    players_paid = sum(1 for p in payout_structure if p > 0)
-    bubble_proximity = max(0, players_remaining - players_paid)
+    players_left = len(stacks)
+    paid = sum(1 for p in payout_structure if p > 0)
+    bubble_prox = max(0, players_left - paid)
 
-    if bubble_proximity <= 3 and players_remaining > players_paid:
-        aggression -= 0.3  # Tighten up near bubble
+    if bubble_prox <= 3 and players_left > paid:
         stage += " (bubble)"
+        agg -= 0.3
 
     return {
         "stage": stage,
         "hero_bb": round(hero_bb, 1),
-        "aggression_modifier": aggression,
-        "open_size": open_size,
-        "bubble_proximity": bubble_proximity,
+        "aggression_modifier": round(agg, 2),
+        "open_size": opens,
+        "bubble_proximity": bubble_prox,
+        "avg_stack_bb": round(avg_stack / bb, 1) if bb > 0 else 0,
     }
