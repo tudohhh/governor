@@ -338,11 +338,13 @@ class MicroCorrectionMouse:
             return
 
         # 3% chance of wrong-click-then-correct
-        if random.random() < 0.03 and x is not None:
-            wrong_x = x + random.randint(-30, 30)
-            wrong_y = y + random.randint(-15, 15)
+        if random.random() < 0.03 and x is not None and self.base is not None:
+            wrong_x = x + random.choice([-1, 1]) * random.randint(15, 35)
+            wrong_y = y + random.choice([-1, 1]) * random.randint(8, 20)
             self.base.move_to(wrong_x, wrong_y)
-            time.sleep(random.uniform(0.1, 0.2))
+            time.sleep(random.uniform(0.08, 0.15))
+            self.base.click(wrong_x, wrong_y)  # actually click the wrong spot
+            time.sleep(random.uniform(0.15, 0.3))  # realize mistake
             self.base.move_to(x, y)
             time.sleep(random.uniform(0.05, 0.1))
 
