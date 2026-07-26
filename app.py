@@ -232,9 +232,9 @@ def main():
     if "sparring_score" not in st.session_state:
         st.session_state.sparring_score = {"correct": 0, "total": 0}
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
         "Analiza Mana", "Range Viewer", "Drill Preflop", "Drill Postflop",
-        "Sparring NL100", "Freq Drill", "ICM/Leaks", "Referinta"
+        "Sparring NL100", "Freq Drill", "ICM/Leaks", "Pio Solver", "Referinta"
     ])
 
     with tab1:
@@ -746,6 +746,64 @@ def main():
                     st.caption(f"💡 Fix: {leak['fix']}")
 
     with tab8:
+        st.subheader("🧮 PioSolver — Nash Equilibrium Solver")
+        st.caption("Rezolvă sub-game-ul Turn+River cu CFR+. Range vs Range.")
+
+        from pio_solver import PioSolver, SolverCache, EquityMatrix
+
+        col_p1, col_p2 = st.columns([1, 2])
+        with col_p1:
+            pot_size = st.number_input("Pot (BB)", 5, 200, 10, key="pio_pot")
+            stack_size = st.number_input("Stack (BB)", 10, 200, 100, key="pio_stack")
+            board_type = st.selectbox("Textură Board", EquityMatrix.BOARD_CLASSES, key="pio_board")
+            hero_pos = st.radio("Poziție Hero", ["IP", "OOP"], key="pio_pos")
+            iterations = st.slider("Iterații CFR", 100, 1000, 300, 50, key="pio_iter")
+
+            if st.button("⚡ Rezolvă", type="primary", use_container_width=True, key="pio_solve"):
+                with st.spinner("Construiește arborele + CFR..."):
+                    solver = PioSolver(pot=pot_size, stack=stack_size)
+                    hero_range = ["AA","KK","QQ","JJ","TT","AKs","AQs","AKo"]
+                    vill_range = ["JJ","TT","99","88","AQ","KQs","AJs"]
+                    result = solver.solve_spot(hero_range, vill_range,
+                                               board_class=board_type,
+                                               hero_position=hero_pos,
+                                               iterations=iterations)
+                    st.session_state.pio_result = result
+                    st.session_state.pio_solver = solver
+                st.rerun()
+
+        with col_p2:
+            if "pio_result" in st.session_state and st.session_state.pio_result:
+                r = st.session_state.pio_result
+                st.success(f"Rezolvat în {r['time']}s ({r['iterations']} iterații)")
+
+                st.metric("Hero EV", f"{r['hero_ev']:.1f} BB",
+                         f"{r['ev_pct_of_pot']:.0f}% pot" if r['ev_pct_of_pot'] < 1000 else f"{r['ev_pct_of_pot']:.0f}%")
+
+                st.markdown("#### Strategia la rădăcină (prima acțiune)")
+                for action, pct in r['actions'].items():
+                    st.progress(pct / 100, text=f"{action}: **{pct:.0f}%**")
+
+                st.caption(f"Board: {r['board_class']} | SPR: {r['spr']} | "
+                          f"Expl: {r['exploitability']:.4f}" if r['exploitability'] else "")
+
+                st.markdown("#### Convergență")
+                if "solver" in st.session_state:
+                    solv = st.session_state.pio_solver
+                    # Show cached spots available
+                    cache = SolverCache()
+                    spots = len(cache._cache)
+                    st.caption(f"{spots} spoturi în cache")
+
+        # Cache management
+        if st.button("🔄 Pre-rezolvă spoturi comune (10 spoturi)", key="pio_cache"):
+            with st.spinner("Pre-rezolvă..."):
+                cache = SolverCache()
+                s = PioSolver()
+                n = cache.pre_solve_common(s)
+                st.success(f"Rezolvate {n} spoturi noi și salvate în cache")
+
+    with tab9:
         st.subheader("Referinta Rapida")
         st.markdown("""
 **Notatie carti:**
