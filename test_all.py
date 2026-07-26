@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from treys import Card
 from board_analyzer import analyze_flop, analyze_turn, describe_board, cbet_sizing_recommendation
 from equity import equity_vs_hand, equity_vs_range, pot_odds_to_equity, all_cards, remove_cards
-from postflop import PostflopEngine, generate_drill_scenario
+from postflop import PostflopEngine, create_engine
 
 
 def test_board_analyzer():
@@ -181,20 +181,19 @@ def test_cbet_sizing():
 
 
 def test_drill_generation():
-    """Test scenario generation for drills."""
-    print("\n=== Drill Generation Test ===")
+    """Test engine creation for drills."""
+    print("\n=== Engine Creation Test ===")
     try:
-        hero, vrange, board, pos, opp, pot, stack = generate_drill_scenario()
-        assert len(hero) == 2
-        assert len(board) == 3
-        assert pot == 7.5
-        print(f"  Generated: {Card.int_to_pretty_str(hero[0])} {Card.int_to_pretty_str(hero[1])} "
-              f"on {' '.join(Card.int_to_pretty_str(c) for c in board)} PASS")
+        engine = create_engine("AKs", "BB", "BTN", "standard")
+        assert engine.hero_cards is not None
+        assert engine.villain_range is not None
+        assert len(engine.villain_range) > 0
+        print(f"  Created engine: AKs BTN vs BB, range size={len(engine.villain_range)} PASS")
     except Exception as e:
-        print(f"  Drill generation: ERROR {e}")
+        print(f"  Engine creation: ERROR {e}")
         raise
 
-    print("  All drill generation tests PASSED")
+    print("  All engine creation tests PASSED")
 
 
 if __name__ == "__main__":
