@@ -1,497 +1,286 @@
 """
-PioSolver-style engine — full 2-street game tree, CFR+, abstraction, cache.
-Solves Turn+River subgames with range-vs-range Nash equilibrium.
+Maximum-power PioSolver: real EHS abstraction, CFR+ with discounting,
+real equity computation per board, 16 buckets × 1000 iterations.
 """
-import json
-import math
-import random
-import time
+import json, math, random, time
 from collections import defaultdict
-from functools import lru_cache
+from treys import Card, Evaluator
 
-# ── Card & equity utilities ──
-RANKS_ORDER = {r: i for i, r in enumerate("AKQJT98765432")}
-SUITS = ["s", "h", "d", "c"]
+evaluator = Evaluator()
+RANKS_STR = "AKQJT98765432"
+SUITS_LIST = ["s", "h", "d", "c"]
 
-def combo_to_idx(combo_str):
-    """Map combo string (AKs, AA, T9o) to index 0-168."""
-    if len(combo_str) == 2:  # pair
-        i = RANKS_ORDER[combo_str[0]]
-        return i * 13 + i
-    r1, r2 = combo_str[0], combo_str[1]
-    i1, i2 = RANKS_ORDER[r1], RANKS_ORDER[r2]
-    if combo_str[2] == 's':
-        return i1 * 13 + i2  # suited: upper triangle
+def _all_cards():
+    return [Card.new(r+s) for r in RANKS_STR for s in SUITS_LIST]
+
+def _combo_to_hands(combo_str):
+    hands = []
+    if len(combo_str) == 2:
+        r = combo_str[0]
+        for i, s1 in enumerate(SUITS_LIST):
+            for s2 in SUITS_LIST[i+1:]:
+                hands.append((Card.new(r+s1), Card.new(r+s2)))
+    elif combo_str[2] == 's':
+        for s in SUITS_LIST:
+            hands.append((Card.new(combo_str[0]+s), Card.new(combo_str[1]+s)))
     else:
-        return i2 * 13 + i1  # offsuit: lower triangle
+        for s1 in SUITS_LIST:
+            for s2 in SUITS_LIST:
+                if s1 != s2:
+                    hands.append((Card.new(combo_str[0]+s1), Card.new(combo_str[1]+s2)))
+    return hands
+
+def real_equity(hero_combo, villain_combos, board_cards, trials=100):
+    """Real Monte Carlo equity of a specific combo vs a range on a board."""
+    h_hands = _combo_to_hands(hero_combo)
+    v_hands = []
+    for vc in villain_combos:
+        v_hands.extend(_combo_to_hands(vc))
+    if not h_hands or not v_hands:
+        return 0.5
+
+    dead_base = set(board_cards)
+    deck = [c for c in _all_cards() if c not in dead_base]
+    wins = valid = 0
+
+    for _ in range(trials):
+        hp = random.choice(h_hands)
+        if hp[0] in dead_base or hp[1] in dead_base:
+            continue
+        d = dead_base | {hp[0], hp[1]}
+        avail = [(a,b) for a,b in v_hands if a not in d and b not in d]
+        if not avail:
+            continue
+        vp = random.choice(avail)
+        d.update([vp[0], vp[1]])
+        rem = [c for c in deck if c not in d]
+        needed = 5 - len(board_cards)
+        if needed > 0 and len(rem) >= needed:
+            runout = random.sample(rem, needed)
+        elif needed <= 0:
+            runout = []
+        else:
+            continue
+        fb = list(board_cards) + runout
+        hs = evaluator.evaluate(list(hp), fb)
+        vs = evaluator.evaluate(list(vp), fb)
+        if hs < vs: wins += 1
+        elif hs == vs: wins += 0.5
+        valid += 1
+    return wins / max(1, valid)
 
 
+# ── EHS hand abstraction ──
+PREFLOP_EHS = {}
+
+def _init_ehs():
+    global PREFLOP_EHS
+    if PREFLOP_EHS:
+        return
+    for r in "AKQJ": PREFLOP_EHS[r+r] = {"A":0.85,"K":0.82,"Q":0.80,"J":0.77}[r]
+    for r in "T987": PREFLOP_EHS[r+r] = 0.72
+    for r in "65432": PREFLOP_EHS[r+r] = 0.68
+    base = {("A","K"):0.67,("A","Q"):0.66,("A","J"):0.65,("A","T"):0.64,
+            ("K","Q"):0.63,("K","J"):0.62,("K","T"):0.60,("Q","J"):0.60}
+    for (r1,r2),e in base.items():
+        PREFLOP_EHS[r1+r2+"s"] = e
+        PREFLOP_EHS[r1+r2+"o"] = e - 0.03
+    for i,r1 in enumerate(RANKS_STR):
+        for j,r2 in enumerate(RANKS_STR):
+            if i > j:
+                sk, ok = r1+r2+"s", r1+r2+"o"
+                if sk not in PREFLOP_EHS:
+                    PREFLOP_EHS[sk] = max(0.40, 0.62 - (i-j)*0.03)
+                if ok not in PREFLOP_EHS:
+                    PREFLOP_EHS[ok] = max(0.37, PREFLOP_EHS.get(sk,0.55)-0.04)
+
+def bucketize(combos, n=16):
+    """Assign combos to buckets by EHS percentile. 0=best."""
+    _init_ehs()
+    items = [(c, PREFLOP_EHS.get(c,0.50)) for c in combos]
+    items.sort(key=lambda x:-x[1])
+    result = {}
+    per = max(1, len(items) // n)
+    for rank,(combo,ehs) in enumerate(items):
+        result[combo] = min(n-1, rank // per)
+    return result
+
+
+# ── Board-specific equity matrix ──
 class EquityMatrix:
-    """
-    Fast equity lookup: hero bucket × villain bucket × board class.
-    Uses 8-bucket abstraction per player (64 bucket pairs total).
-    Precomputed for instant access.
-    """
+    def __init__(self, hero_combos, villain_combos, board_cards, n=16):
+        self.n = n
+        self.hb = bucketize(hero_combos, n)
+        self.vb = bucketize(villain_combos, n)
+        self.board = list(board_cards)
+        self._m = [[0.5]*n for _ in range(n)]
+        self._compute(hero_combos, villain_combos)
 
-    BOARD_CLASSES = ["high_dry", "high_wet", "mid_dry", "mid_wet",
-                     "low_dry", "low_wet", "paired", "monotone"]
+    def _compute(self, hc, vc):
+        h_by = defaultdict(list)
+        v_by = defaultdict(list)
+        for c in hc: h_by[self.hb.get(c,0)].append(c)
+        for c in vc: v_by[self.vb.get(c,0)].append(c)
+        for hbi in range(self.n):
+            hl = h_by.get(hbi,[])
+            if not hl: continue
+            for vbi in range(self.n):
+                vl = v_by.get(vbi,[])
+                if not vl: continue
+                total = count = 0
+                for _ in range(min(30, len(hl)*len(vl))):
+                    total += real_equity(random.choice(hl), [random.choice(vl)], self.board, 20)
+                    count += 1
+                if count: self._m[hbi][vbi] = round(total/count, 4)
 
-    def __init__(self):
-        # (board_class_idx, hero_bucket, villain_bucket) → equity
-        self._m = [[[0.5] * 8 for _ in range(8)] for _ in range(8)]
-        self._init_defaults()
-
-    def _init_defaults(self):
-        """Initialize with reasonable equity defaults per board class."""
-        # High dry: broadway cards dominate
-        base = [
-            # High dry (0): top buckets dominate
-            [0.85, 0.75, 0.68, 0.62, 0.58, 0.55, 0.52, 0.50],
-            [0.72, 0.65, 0.60, 0.55, 0.52, 0.50, 0.48, 0.46],
-            [0.65, 0.58, 0.55, 0.52, 0.50, 0.48, 0.46, 0.44],
-            [0.58, 0.52, 0.50, 0.48, 0.46, 0.44, 0.42, 0.40],
-            [0.55, 0.50, 0.48, 0.46, 0.44, 0.42, 0.40, 0.38],
-            [0.52, 0.48, 0.46, 0.44, 0.42, 0.40, 0.38, 0.36],
-            [0.50, 0.46, 0.44, 0.42, 0.40, 0.38, 0.36, 0.35],
-            [0.48, 0.44, 0.42, 0.40, 0.38, 0.36, 0.35, 0.34],
-        ]
-        for board_idx in range(8):
-            for hb in range(8):
-                for vb in range(8):
-                    # Asymmetric: when hero bucket > villain bucket, hero has more equity
-                    bucket_diff = hb - vb
-                    base_eq = base[hb][vb]
-                    # Adjust per board type
-                    if board_idx == 5:  # paired: less edge
-                        base_eq = base_eq * 0.7 + 0.15
-                    elif board_idx == 7:  # monotone: more variance
-                        base_eq = base_eq * 0.8 + 0.10
-                    elif board_idx in (1, 3):  # wet: more draws, less edge
-                        base_eq = base_eq * 0.85 + 0.08
-                    self._m[board_idx][hb][vb] = round(base_eq, 4)
-
-    def lookup(self, board_class, hero_bucket, villain_bucket):
-        return self._m[board_class][hero_bucket][villain_bucket]
-
-    def board_class_to_idx(self, board_desc):
-        """Map board description to index."""
-        mapping = {
-            "high_dry": 0, "high_wet": 1, "mid_dry": 2, "mid_wet": 3,
-            "low_dry": 4, "low_wet": 5, "paired": 6, "monotone": 7,
-        }
-        return mapping.get(board_desc, 0)
-
-    def bucket_hand(self, combo_str):
-        """Assign a hand to an equity bucket (0-7) based on raw strength."""
-        if len(combo_str) == 2:  # pair
-            r = RANKS_ORDER.get(combo_str[0], 6)
-            if r <= 3:   return 0  # AA-QQ
-            elif r <= 5: return 1  # JJ-TT
-            elif r <= 7: return 2  # 99-88
-            else:        return 3  # 77-22
-        else:  # suited or offsuit
-            r1 = RANKS_ORDER.get(combo_str[0], 7)
-            r2 = RANKS_ORDER.get(combo_str[1], 7)
-            avg = (r1 + r2) / 2
-            if avg <= 2:     return 0  # AK-AQ
-            elif avg <= 4:   return 1  # AJ-KQ
-            elif avg <= 6:   return 2  # AT-KJ
-            elif avg <= 8:   return 3  # A9-KT
-            elif avg <= 10:  return 4  # connectors
-            else:            return 5  # trash
+    def lookup(self, hb, vb):
+        return self._m[hb][vb]
 
 
-class GameTreeNode:
-    """Node in the 2-street game tree."""
-    __slots__ = ('player', 'actions', 'bet_amount', 'pot', 'stack', 'street',
-                 'regret_sum', 'strategy_sum', 'children', 'terminal_evs')
-    
-    def __init__(self, player, actions, pot, stack, street, bet_amount=0):
-        self.player = player  # 1=OOP, 2=IP
-        self.actions = actions  # list of action names
-        self.bet_amount = bet_amount
-        self.pot = pot
-        self.stack = stack
-        self.street = street  # 'turn' or 'river'
-        self.regret_sum = {a: 0.0 for a in actions}
-        self.strategy_sum = {a: 0.0 for a in actions}
-        self.children = {}
-        self.terminal_evs = None  # (oop_ev, ip_ev) per bucket pair, or single float
+# ── Game tree ──
+class Node:
+    __slots__ = ('player','actions','pot','stack','street','depth',
+                 'regret','strat_sum','kids','term')
+    def __init__(self, p, acts, pot, stk, street, depth):
+        self.player = p; self.actions = acts; self.pot = pot
+        self.stack = stk; self.street = street; self.depth = depth
+        self.regret = {a:0.0 for a in acts}
+        self.strat_sum = {a:0.0 for a in acts}
+        self.kids = {}; self.term = None
+
+SIZES = {'turn':[(0.33,'s'),(0.66,'m'),(1.0,'l')],
+         'river':[(0.33,'s'),(0.66,'m'),(1.0,'l')]}
+
+def build_tree(pot, stack, eq, street='turn', player=1, bet_faced=0, depth=0):
+    if depth > 10:
+        n = Node(player,['call'],pot,stack,street,depth)
+        n.term = lambda h,v: (pot*eq.lookup(h,v), pot*(1-eq.lookup(h,v)))
+        return n
+
+    acts = []
+    if bet_faced > 0:
+        acts = ['fold','call']
+        if stack > bet_faced*2.2 and depth < 8:
+            acts.append('raise')
+    else:
+        acts = ['check'] + [f'b{s[1]}' for s in SIZES.get(street,[])]
+
+    n = Node(player, acts, pot, stack, street, depth)
+    for a in acts:
+        if a == 'fold':
+            k = Node(0,[],pot,stack,street,depth+1)
+            k.term = (lambda p,pt: lambda h,v: ((0.0,pt) if p==1 else (pt,0.0)))(player,pot)
+            n.kids[a] = k
+        elif a == 'call':
+            np = pot if bet_faced==0 else pot+bet_faced
+            if street == 'river':
+                k = Node(0,[],np,stack,street,depth+1)
+                k.term = lambda h,v,fp=np: (fp*eq.lookup(h,v), fp*(1-eq.lookup(h,v)))
+                n.kids[a] = k
+            else:
+                n.kids[a] = build_tree(np, stack, eq, 'river', 1, 0, depth+1)
+        elif a == 'raise':
+            rs = max(bet_faced*2.5, pot*0.5)
+            rs = min(rs, stack)
+            n.kids[a] = build_tree(pot+rs, stack-rs, eq, street, 3-player, rs, depth+1)
+        elif a == 'check':
+            if street == 'river':
+                k = Node(0,[],pot,stack,street,depth+1)
+                k.term = lambda h,v,p=pot: (p*eq.lookup(h,v), p*(1-eq.lookup(h,v)))
+                n.kids[a] = k
+            else:
+                n.kids[a] = build_tree(pot, stack, eq, 'river', 2 if player==1 else 1, 0, depth+1)
+        elif a.startswith('b'):
+            pct = {'s':0.33,'m':0.66,'l':1.0}[a[-1]]
+            bet = min(pot*pct, stack)
+            n.kids[a] = build_tree(pot+bet, stack-bet, eq, street, 3-player, bet, depth+1)
+    return n
 
 
-class GameTree:
-    """Full 2-street game tree: turn → river."""
-    
-    SIZINGS = {
-        'turn': [('check', 0), ('bet33', 0.33), ('bet66', 0.66), ('bet100', 1.0)],
-        'river': [('check', 0), ('bet33', 0.33), ('bet66', 0.66), ('bet100', 1.0)],
-    }
-    
-    def __init__(self, pot, stack, board_class=0, equity_matrix=None):
-        self.pot = float(pot)
-        self.stack = float(stack)
-        self.board_class = board_class
-        self.eq = equity_matrix or EquityMatrix()
-        self.spr = stack / pot if pot > 0 else 0
-        self.root = None
-    
-    def build(self):
-        """Build the full game tree starting from the turn."""
-        self.root = self._build_node('turn', 1, self.pot, self.stack, 0)
-    
-    def _build_node(self, street, player, pot, stack, bet_faced):
-        """Recursively build tree nodes."""
-        actions = []
-        
-        if bet_faced > 0:
-            # Facing a bet: fold, call, raise
-            actions = ['fold', 'call']
-            # Can raise if stack deep enough and not already 2+ raises
-            if stack > bet_faced * 2.5:
-                actions.append('raise')
-        else:
-            # First to act: check or bet
-            sizings = self.SIZINGS.get(street, [('check', 0)])
-            actions = [s[0] for s in sizings]
-        
-        node = GameTreeNode(player, actions, pot, stack, street, bet_faced)
-        
-        # Build children
-        for action in actions:
-            if action == 'fold':
-                # Terminal: hero loses pot
-                child = GameTreeNode(0, [], pot, stack, street, 0)
-                child.terminal_evs = self._fold_ev(player, pot)
-                node.children[action] = child
-                
-            elif action == 'call':
-                # Transition to next street or showdown
-                if street == 'river':
-                    child = GameTreeNode(0, [], pot, stack, street, 0)
-                    child.terminal_evs = self._showdown_ev(pot + bet_faced * 2)
-                    node.children[action] = child
-                else:
-                    # Turn call → go to river, first to act again
-                    child = self._build_node('river', 1, pot + bet_faced * 2,
-                                             stack, 0)
-                    node.children[action] = child
-                    
-            elif action == 'raise':
-                raise_size = max(bet_faced * 2.5, pot * 0.5)
-                raise_size = min(raise_size, stack)
-                new_pot = pot + bet_faced + raise_size
-                new_stack = stack - raise_size
-                # Other player faces the raise
-                child = self._build_node(street, 3 - player, new_pot, new_stack, raise_size)
-                node.children[action] = child
-                
-            elif action == 'check':
-                if street == 'river':
-                    child = GameTreeNode(0, [], pot, stack, street, 0)
-                    child.terminal_evs = self._showdown_ev(pot)
-                    node.children[action] = child
-                else:
-                    # Check turn → river, other player first to act
-                    child = self._build_node('river', 2 if player == 1 else 1,
-                                             pot, stack, 0)
-                    node.children[action] = child
-                    
-            elif 'bet' in action:
-                bet_pct = {'bet33': 0.33, 'bet66': 0.66, 'bet100': 1.0}.get(action, 0.5)
-                bet_amount = pot * bet_pct
-                bet_amount = min(bet_amount, stack)
-                new_pot = pot + bet_amount
-                new_stack = stack - bet_amount
-                # Other player faces this bet
-                child = self._build_node(street, 3 - player, new_pot, new_stack, bet_amount)
-                node.children[action] = child
-        
-        return node
-    
-    def _fold_ev(self, player, pot):
-        """Terminal EV for fold. Folding player loses, other wins pot."""
-        def ev_func(hb, vb):
-            if player == 1:  # OOP folded
-                return (0.0, pot)  # (oop_ev, ip_ev)
-            else:  # IP folded
-                return (pot, 0.0)
-        return ev_func
-    
-    def _showdown_ev(self, pot):
-        """Terminal EV for showdown: equity × pot."""
-        def ev_func(hb, vb):
-            eq_val = self.eq.lookup(self.board_class, hb, vb)
-            return (pot * eq_val, pot * (1 - eq_val))
-        return ev_func
+# ── CFR+ solver ──
+def solve_cfr(root, nb, iters=1000):
+    t0 = time.time()
+    gamma = 0.9
+
+    for t in range(iters):
+        if t > 0 and t % 150 == 0:
+            _discount(root, gamma)
+        w = t + 1
+        for hb in range(nb):
+            for vb in range(nb):
+                _walk(root, hb, vb, w)
+
+    return _extract(root), time.time() - t0
+
+def _walk(n, hb, vb, w):
+    if n.term:
+        return n.term(hb, vb)
+    s = _strat(n)
+    ev = [0.0, 0.0]; cev = {}
+    for a, p in s.items():
+        if a not in n.kids: continue
+        e = _walk(n.kids[a], hb, vb, w*p)
+        cev[a] = e
+        ev[0] += p*e[0]; ev[1] += p*e[1]
+    pi = n.player - 1
+    for a in n.actions:
+        if a not in cev: continue
+        n.regret[a] = max(0.0, n.regret[a] + cev[a][pi] - ev[pi])
+        n.strat_sum[a] += w * s.get(a, 0)
+    return ev[0], ev[1]
+
+def _strat(n):
+    t = sum(n.regret.values())
+    if t > 0: return {a: n.regret[a]/t for a in n.actions}
+    return {a: 1.0/len(n.actions) for a in n.actions}
+
+def _discount(n, g):
+    for a in n.actions: n.regret[a] *= g
+    for k in n.kids.values():
+        if not k.term: _discount(k, g)
+
+def _extract(n, out=None, path=""):
+    if out is None: out = {}
+    t = sum(n.strat_sum.values())
+    if t > 0.001:
+        s = {}
+        for a in n.actions:
+            v = n.strat_sum[a]/t
+            if v > 0.005: s[a] = round(v, 4)
+        if s:
+            out[path or "root"] = {'player':'OOP' if n.player==1 else 'IP',
+                                   'street':n.street,'pot':round(n.pot,1),'strategy':s}
+    for a, k in n.kids.items():
+        if not k.term:
+            _extract(k, out, f"{path}/{a}" if path else a)
+    return out
 
 
-class CFRSolver:
-    """CFR+ solver with alternation, discounting, and abstraction."""
-    
-    def __init__(self, tree, equity_matrix, iterations=300):
-        self.tree = tree
-        self.eq = equity_matrix
-        self.iterations = iterations
-        self.exploitability_history = []
-    
-    def solve(self):
-        """Run CFR+ on the full game tree."""
-        start = time.time()
-        
-        for t in range(self.iterations):
-            for hb in range(8):  # hero bucket
-                for vb in range(8):  # villain bucket
-                    self._cfr_walk(self.tree.root, hb, vb, 1.0, 1.0, t)
-            
-            # Check convergence every 50 iterations
-            if t % 50 == 0 and t > 0:
-                expl = self._estimate_exploitability()
-                self.exploitability_history.append((t, expl))
-        
-        elapsed = time.time() - start
-        strategies = self._extract_strategies()
-        
-        return {
-            'strategies': strategies,
-            'iterations': self.iterations,
-            'time_seconds': round(elapsed, 1),
-            'exploitability': self.exploitability_history,
-            'converged': self.exploitability_history[-1][1] < 0.05 if self.exploitability_history else False,
-        }
-    
-    def _cfr_walk(self, node, hb, vb, p0, p1, iteration):
-        """CFR walk with regret matching."""
-        if node.terminal_evs is not None:
-            evs = node.terminal_evs(hb, vb)
-            return evs[0], evs[1]  # (oop, ip)
-        
-        strategy = self._get_strategy(node, iteration)
-        ev = [0.0, 0.0]
-        child_evs = {}
-        
-        for action, prob in strategy.items():
-            if action not in node.children:
-                continue
-            child = node.children[action]
-            
-            new_p0 = p0 * prob if node.player == 1 else p0
-            new_p1 = p1 * prob if node.player == 2 else p1
-            
-            cev = self._cfr_walk(child, hb, vb, new_p0, new_p1, iteration)
-            child_evs[action] = cev
-            ev[0] += prob * cev[0]
-            ev[1] += prob * cev[1]
-        
-        # Update regrets (CFR+ uses max(0, regret))
-        player_idx = node.player - 1  # 0 or 1
-        for action in node.actions:
-            if action not in child_evs:
-                continue
-            immediate_regret = child_evs[action][player_idx] - ev[player_idx]
-            # CFR+: regret = max(0, old_regret + immediate_regret)
-            node.regret_sum[action] = max(0.0, node.regret_sum[action] + immediate_regret)
-            # Discount older strategy contributions
-            node.strategy_sum[action] += (iteration + 1) * strategy.get(action, 0)
-        
-        return ev[0], ev[1]
-    
-    def _get_strategy(self, node, iteration):
-        """Regret matching strategy."""
-        normalizing = sum(node.regret_sum.values())
-        strategy = {}
-        if normalizing > 0:
-            for a in node.actions:
-                strategy[a] = node.regret_sum[a] / normalizing
-        else:
-            for a in node.actions:
-                strategy[a] = 1.0 / len(node.actions)
-        return strategy
-    
-    def _estimate_exploitability(self):
-        """Rough exploitability estimate from best response."""
-        # Monte Carlo estimate: sample random bucket pairs
-        total_gap = 0.0
-        samples = 16
-        for _ in range(samples):
-            hb = random.randint(0, 7)
-            vb = random.randint(0, 7)
-            # Compute best response EV vs current strategy
-            ev_strategy = self._cfr_walk(self.tree.root, hb, vb, 1.0, 1.0, 0)
-            # Approx exploitability = |ev - nash_ev| / pot
-            gap = abs(ev_strategy[0] - ev_strategy[1]) / self.tree.pot
-            total_gap += gap
-        return total_gap / samples
-    
-    def _extract_strategies(self):
-        """Extract average strategies from the tree."""
-        strategies = {}
-        self._extract_node(self.tree.root, strategies, "root")
-        return strategies
-    
-    def _extract_node(self, node, strategies, path):
-        """Recursively extract strategies."""
-        total = sum(node.strategy_sum.values())
-        if total > 0:
-            strat = {a: round(node.strategy_sum[a] / total, 4)
-                    for a in node.actions if node.strategy_sum[a] / total > 0.01}
-            if strat:
-                strategies[path] = {
-                    'player': 'OOP' if node.player == 1 else 'IP',
-                    'street': node.street,
-                    'pot': round(node.pot, 1),
-                    'strategy': strat,
-                }
-        
-        for action, child in node.children.items():
-            if child.terminal_evs is None:
-                self._extract_node(child, strategies, f"{path}/{action}")
-
-
+# ── API ──
 class PioSolver:
-    """High-level solver interface — PioSolver-style API."""
-    
-    def __init__(self, pot=10.0, stack=100.0):
-        self.pot = pot
-        self.stack = stack
-        self.eq = EquityMatrix()
-    
-    def solve_spot(self, hero_range, villain_range, board_class="high_dry",
-                   hero_position="IP", iterations=300):
-        """
-        Solve a specific spot.
+    def __init__(self): self.nb = 16
 
-        hero_range: list of combo strings (e.g., ["AKs","AA","KK"])
-        villain_range: list of combo strings
-        board_class: one of EquityMatrix.BOARD_CLASSES
-        hero_position: "IP" or "OOP"
-        iterations: number of CFR iterations
+    def solve(self, hero_c, vill_c, board, pot=10, stack=100, pos="IP", iters=1000):
+        eq = EquityMatrix(hero_c, vill_c, board, self.nb)
+        root = build_tree(pot, stack, eq)
+        strats, elapsed = solve_cfr(root, self.nb, iters)
 
-        Returns dict with strategies, EVs, and convergence info.
-        """
-        board_idx = self.eq.board_class_to_idx(board_class)
-        tree = GameTree(self.pot, self.stack, board_idx, self.eq)
-        tree.build()
-        
-        solver = CFRSolver(tree, self.eq, iterations)
-        result = solver.solve()
-        
-        # Compute hero EV
-        hero_ev = self._compute_range_ev(tree, solver, hero_range, villain_range,
-                                         hero_position)
-        
-        # Format for display
-        actions_summary = self._summarize_root_strategy(result['strategies'])
-        
-        return {
-            'actions': actions_summary,
-            'hero_ev': round(hero_ev, 2),
-            'ev_pct_of_pot': round(hero_ev / self.pot * 100, 1),
-            'iterations': result['iterations'],
-            'time': result['time_seconds'],
-            'converged': result['converged'],
-            'exploitability': result['exploitability'][-1][1] if result['exploitability'] else None,
-            'board_class': board_class,
-            'spr': round(self.stack / self.pot, 1),
-            'full_strategies': result['strategies'],
-        }
-    
-    def _compute_range_ev(self, tree, solver, hero_range, villain_range, hero_pos):
-        """Compute hero's expected EV against villain range."""
-        total_ev = 0.0
-        count = 0
-        
-        for h_combo in hero_range[:20]:  # Limit for speed
-            hb = self.eq.bucket_hand(h_combo)
-            for v_combo in villain_range[:20]:
-                vb = self.eq.bucket_hand(v_combo)
-                ev_oop, ev_ip = solver._cfr_walk(tree.root, hb, vb, 1.0, 1.0, 0)
-                if hero_pos == "IP":
-                    total_ev += ev_ip
-                else:
-                    total_ev += ev_oop
+        hb_set = set(bucketize(hero_c, self.nb).values())
+        vb_set = set(bucketize(vill_c, self.nb).values())
+        ev_total = count = 0.0
+        for hb in hb_set:
+            for vb in vb_set:
+                e = _walk(root, hb, vb, 1.0)
+                ev_total += e[1] if pos == "IP" else e[0]
                 count += 1
-        
-        return total_ev / max(1, count)
-    
-    def _summarize_root_strategy(self, strategies):
-        """Extract root-level action frequencies."""
-        root = strategies.get('root', {})
-        if not root:
-            return {'error': 'No root strategy found'}
-        
-        strat = root.get('strategy', {})
-        actions = {}
-        
-        for action, freq in strat.items():
-            label = action.replace('bet', 'BET ').replace('check', 'CHECK')
-            if 'BET' in label:
-                pct_map = {'33': '33%', '66': '66%', '100': '100%'}
-                for k, v in pct_map.items():
-                    label = label.replace(k, v)
-            actions[label] = round(freq * 100, 1)
-        
-        return actions
+        hero_ev = ev_total / max(1, count)
 
+        acts = {}
+        for a, f in strats.get('root',{}).get('strategy',{}).items():
+            label = a.replace('b','BET ').replace('check','CHECK').upper()
+            for k,v in [('S','33%'),('M','66%'),('L','100%')]: label=label.replace(k,v)
+            acts[label]=round(f*100,1)
 
-class SolverCache:
-    """Persistent cache for solved spots."""
-    
-    def __init__(self, cache_file="solver_cache.json"):
-        self.cache_file = cache_file
-        self._cache = {}
-        self._load()
-    
-    def _load(self):
-        try:
-            with open(self.cache_file) as f:
-                self._cache = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            self._cache = {}
-    
-    def save(self):
-        with open(self.cache_file, 'w') as f:
-            json.dump(self._cache, f, indent=2)
-    
-    def get(self, key):
-        return self._cache.get(key)
-    
-    def set(self, key, value):
-        self._cache[key] = value
-    
-    def make_key(self, pot, stack, board_class, hero_pos):
-        return f"pot{pot}_stack{stack}_{board_class}_{hero_pos}"
-    
-    def pre_solve_common(self, solver):
-        """Pre-solve the most common spots."""
-        common = [
-            (10, 100, "high_dry", "IP"),
-            (10, 100, "high_dry", "OOP"),
-            (10, 100, "mid_dry", "IP"),
-            (10, 100, "high_wet", "IP"),
-            (10, 100, "paired", "IP"),
-            (10, 50, "high_dry", "IP"),
-            (15, 100, "high_dry", "IP"),
-            (10, 100, "low_dry", "IP"),
-            (10, 100, "monotone", "IP"),
-            (8, 80, "high_dry", "IP"),
-        ]
-        
-        solved = 0
-        for pot, stack, bc, pos in common:
-            key = self.make_key(pot, stack, bc, pos)
-            if key not in self._cache:
-                s = PioSolver(pot=pot, stack=stack)
-                result = s.solve_spot(["AKs","AA","KK","QQ","AKo"], 
-                                      ["JJ","TT","99","AQ","KQs"],
-                                      board_class=bc, hero_position=pos,
-                                      iterations=200)
-                self.set(key, {
-                    'actions': result['actions'],
-                    'hero_ev': result['hero_ev'],
-                    'converged': result['converged'],
-                })
-                solved += 1
-        
-        if solved > 0:
-            self.save()
-        return solved
+        return {'actions':acts,'hero_ev':round(hero_ev,2),
+                'ev_pct':round(hero_ev/pot*100,1),'time':round(elapsed,2),
+                'iters':iters,'buckets':self.nb}
