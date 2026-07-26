@@ -232,7 +232,10 @@ def main():
     if "sparring_score" not in st.session_state:
         st.session_state.sparring_score = {"correct": 0, "total": 0}
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Analiza Mana", "Range Viewer", "Drill Preflop", "Drill Postflop", "Sparring NL100", "Referinta"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+        "Analiza Mana", "Range Viewer", "Drill Preflop", "Drill Postflop",
+        "Sparring NL100", "Freq Drill", "ICM/Leaks", "Referinta"
+    ])
 
     with tab1:
         col1, col2 = st.columns([1, 2])
@@ -633,6 +636,116 @@ def main():
                                   f"Range rămas: {rr.get('range_narrowed','?')} combos")
 
     with tab6:
+        st.subheader("🎯 Frequency Drill")
+        st.caption("Antrenează frecvențele GTO, nu doar deciziile individuale.")
+
+        from trainer_advanced import FrequencyDrill
+        if "freq_drill" not in st.session_state:
+            st.session_state.freq_drill = None
+        if "freq_responses" not in st.session_state:
+            st.session_state.freq_responses = []
+
+        col_f1, col_f2 = st.columns([1, 2])
+        with col_f1:
+            if st.button("Generează Scenariu", type="primary", key="gen_freq"):
+                drill = FrequencyDrill()
+                drill.generate_scenario()
+                st.session_state.freq_drill = drill
+                st.session_state.freq_responses = []
+                st.rerun()
+
+            if st.session_state.freq_drill:
+                fd = st.session_state.freq_drill
+                st.info(f"Decizii: **{len(fd.responses)}/{fd.num_repetitions}**")
+                if len(fd.responses) >= fd.num_repetitions:
+                    score = fd.get_score()
+                    st.metric("Scor Frecvență", f"{score['score']*100:.0f}%")
+                    st.caption(score['feedback'])
+
+        with col_f2:
+            if st.session_state.freq_drill:
+                fd = st.session_state.freq_drill
+                sc = fd.scenario
+                hero_s = " ".join(Card.int_to_pretty_str(c) for c in sc["hero"])
+                board_s = " ".join(Card.int_to_pretty_str(c) for c in sc["board"])
+                st.markdown(f"### {hero_s} pe {board_s}")
+                st.caption(f"{sc['texture']} | Equity: {sc['equity']*100:.0f}% | GTO: {sc['gto_action']}")
+
+                if len(fd.responses) < fd.num_repetitions:
+                    c1, c2 = st.columns(2)
+                    if c1.button("BET", key="freq_bet", use_container_width=True):
+                        fd.record_response("BET")
+                        st.session_state.freq_responses = fd.responses
+                        st.rerun()
+                    if c2.button("CHECK", key="freq_chk", use_container_width=True):
+                        fd.record_response("CHECK")
+                        st.session_state.freq_responses = fd.responses
+                        st.rerun()
+                else:
+                    freqs = fd.get_score()
+                    st.progress(freqs["frequencies"]["BET"], text=f"BET: {freqs['frequencies']['BET']*100:.0f}% (țintă: {freqs['targets']['BET']*100:.0f}%)")
+                    st.progress(freqs["frequencies"]["CHECK"], text=f"CHECK: {freqs['frequencies']['CHECK']*100:.0f}% (țintă: {freqs['targets']['CHECK']*100:.0f}%)")
+
+    with tab7:
+        st.subheader("💰 ICM & Leak Finder")
+        st.caption("Calcule ICM pentru turnee + analiză leak-uri.")
+
+        col_i1, col_i2 = st.columns(2)
+        with col_i1:
+            st.markdown("#### Calculator ICM")
+            stack_input = st.text_input("Stack-uri (separate prin virgulă)", "1000,800,600,400", key="icm_stacks")
+            payout_input = st.text_input("Payouts (separate prin virgulă)", "0.5,0.3,0.2", key="icm_payouts")
+
+            if st.button("Calculează ICM", key="calc_icm"):
+                try:
+                    from icm import icm_equity, tournament_stage_adjustment
+                    stacks = [float(s.strip()) for s in stack_input.split(",")]
+                    payouts = [float(p.strip()) for p in payout_input.split(",")]
+                    while len(payouts) < len(stacks):
+                        payouts.append(0.0)
+                    eqs = icm_equity(stacks, payouts[:len(stacks)])
+                    st.success("ICM Equity:")
+                    for i, (s, eq) in enumerate(zip(stacks, eqs)):
+                        st.write(f"Jucător {i+1} ({s:.0f} chips): **{eq*100:.1f}%** din prize pool")
+
+                    stage = tournament_stage_adjustment(stacks, [50, 100], payouts)
+                    st.info(f"Stage: **{stage['stage']}** | Deschidere: {stage['open_size']} | "
+                           f"Hero: {stage['hero_bb']:.0f}BB")
+                except Exception as e:
+                    st.error(f"Eroare: {e}")
+
+        with col_i2:
+            st.markdown("#### Leak Finder")
+            st.caption("Analizează deciziile tale și găsește pattern-uri.")
+
+            if "leak_finder" not in st.session_state:
+                st.session_state.leak_finder = None
+
+            if st.button("Simulează Sesiune (20 mâini)", key="sim_session"):
+                from trainer_advanced import LeakFinder
+                lf = LeakFinder()
+                actions = ["BET", "CHECK", "FOLD", "CALL"]
+                for _ in range(20):
+                    lf.add_decision({
+                        "street": "FLOP",
+                        "user_action": "BET" if random.random() < 0.75 else random.choice(actions),
+                        "bet_faced": 0 if random.random() < 0.7 else random.randint(3, 8),
+                        "sizing": random.choice([0.33, 0.50, 0.66]),
+                    })
+                st.session_state.leak_finder = lf
+                st.rerun()
+
+            if st.session_state.leak_finder:
+                result = st.session_state.leak_finder.analyze()
+                st.metric("Decizii analizate", result["total_decisions"])
+                st.metric("Leak-uri găsite", result["leaks_found"])
+                for leak in result.get("leaks", []):
+                    sev_color = {"high": "red", "medium": "orange", "low": "blue"}
+                    st.markdown(f"**:{sev_color.get(leak['severity'],'gray')}[{leak['severity'].upper()}]** "
+                               f"{leak['detail']}")
+                    st.caption(f"💡 Fix: {leak['fix']}")
+
+    with tab8:
         st.subheader("Referinta Rapida")
         st.markdown("""
 **Notatie carti:**
