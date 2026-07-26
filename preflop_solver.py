@@ -18,12 +18,16 @@ SUITS = ["s", "h", "d", "c"]
 
 
 def all_169_combos():
+    """Generate all 169 combos in standard order (higher rank first)."""
     combos = []
     for i, r1 in enumerate(RANKS):
         for j, r2 in enumerate(RANKS):
-            if i < j: continue
-            if i == j: combos.append(r1 + r2)
-            else: combos.append(r1 + r2 + "s"); combos.append(r2 + r1 + "o")
+            if i > j: continue  # only i <= j (r1 higher or equal rank)
+            if i == j:
+                combos.append(r1 + r2)  # pair
+            else:
+                combos.append(r1 + r2 + "s")   # suited: higher rank first
+                combos.append(r1 + r2 + "o")   # offsuit: higher rank first
     return combos
 
 
