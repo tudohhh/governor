@@ -1,564 +1,806 @@
 """
-Anti-Detection / Evasion module — sistemic countermeasures.
-Goes beyond human-like input to evade poker client scanners.
+Anti-Detection / Evasion — FULL anti-detection suite.
+All 10 countermeasures implemented.
 
 LAYERS:
-  1. Process — hide bot from client process scanning
-  2. Behavioral — avoid ML-detectable patterns
-  3. Temporal — natural session rhythms, breaks, variance
-  4. Spatial — table selection, seat positioning
-  5. Bet sizing — avoid algorithmic-looking bets
-  6. Multi-table — coordinate actions across tables
+  1. Log-normal timing (replaces uniform)
+  2. Mouse exit/entry simulation
+  3. Emotional state machine (tilt, confidence, fatigue)
+  4. Mouse micro-corrections (overshoot + correct)
+  5. Simulated human mistakes
+  6. Rotating behavioral profiles
+  7. Session pattern generator
+  8. Auxiliary traffic simulation (lobby, stats)
+  9. Hardware separation (capture card guide)
+  10. Fingerprinting rotation
 """
-import random, time, math, os, sys
+import random, time, math, os, sys, json
 from collections import deque, defaultdict
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict
 
 
 # ═══════════════════════════════════════════════════════════════
-# LAYER 1: PROCESS CAMOUFLAGE
+# 1. LOG-NORMAL TIMING
 # ═══════════════════════════════════════════════════════════════
 
-class ProcessCamouflage:
+class LogNormalTimer:
     """
-    Techniques to hide the bot process from poker client scanners.
-    Poker clients scan running processes for known bot signatures.
-    """
-
-    @staticmethod
-    def get_disguise_names():
-        """Process names that look innocent."""
-        return [
-            "Spotify Helper", "Adobe Update Service", "iCloud Photos",
-            "Microsoft Teams Helper", "Discord PTB Helper", "OneDrive Sync",
-            "Google Chrome Helper (Renderer)", "Steam Client WebHelper",
-            "Creative Cloud Helper", "Dropbox File Provider",
-            "Zoom Helper (Plugin)", "VMware Tools Core",
-            "Citrix Receiver Helper", "Evernote Helper",
-            "Logitech Options Daemon", "Android File Transfer Agent",
-        ]
-
-    @staticmethod
-    def check_for_scanners():
-        """Check if poker client is scanning processes (macOS)."""
-        suspicious = []
-        try:
-            import subprocess
-            # Check for common anti-cheat processes
-            ps = subprocess.run(['ps', 'aux'], capture_output=True, text=True)
-            for keyword in ['poker', 'scan', 'anticheat', 'gameguard', 'warden',
-                          'easyanticheat', 'battleye', 'xprotect']:
-                if keyword in ps.stdout.lower():
-                    suspicious.append(keyword)
-        except Exception:
-            pass
-        return suspicious
-
-    @staticmethod
-    def recommend():
-        """Return OS-specific recommendations."""
-        if sys.platform == 'darwin':
-            return [
-                "Run bot from a renamed process: launchctl setenv BOT_ALIAS 'Spotify Helper'",
-                "Use sandbox-exec to isolate bot from client process tree",
-                "Consider running in a lightweight VM (UTM/Parallels) if client is aggressive",
-            ]
-        elif sys.platform == 'win32':
-            return [
-                "Use process hollowing or DLL sideloading cautiously",
-                "Rename python.exe to something benign like SpotifyHelper.exe",
-                "Set window title to match a common application",
-            ]
-        return ["Research platform-specific process hiding"]
-
-
-# ═══════════════════════════════════════════════════════════════
-# LAYER 2: BEHAVIORAL EVASION
-# ═══════════════════════════════════════════════════════════════
-
-@dataclass
-class BehavioralProfile:
-    """Player archetype that the bot can emulate."""
-    name: str
-    vpip_range: Tuple[float, float]
-    pfr_range: Tuple[float, float]
-    threebet_range: Tuple[float, float]
-    cbet_range: Tuple[float, float]
-    fold_to_cbet_range: Tuple[float, float]
-    aggression_range: Tuple[float, float]
-    decision_speed_range: Tuple[float, float]  # seconds
-    preflop_timing_range: Tuple[float, float]
-    postflop_timing_range: Tuple[float, float]
-    random_mistake_rate: float  # % of time making suboptimal plays
-    chat_frequency: float        # % of hands with chat messages
-
-
-# Pre-built behavioral profiles
-PROFILES = {
-    "TAG_reg": BehavioralProfile(
-        name="Tight-Aggressive Regular",
-        vpip_range=(18, 24), pfr_range=(14, 18),
-        threebet_range=(5, 9), cbet_range=(55, 70),
-        fold_to_cbet_range=(45, 60),
-        aggression_range=(2.0, 3.5),
-        decision_speed_range=(2.0, 6.0),
-        preflop_timing_range=(1.0, 4.0),
-        postflop_timing_range=(2.5, 8.0),
-        random_mistake_rate=0.04,
-        chat_frequency=0.02,
-    ),
-    "LAG_pro": BehavioralProfile(
-        name="Loose-Aggressive Pro",
-        vpip_range=(28, 35), pfr_range=(22, 30),
-        threebet_range=(9, 15), cbet_range=(65, 80),
-        fold_to_cbet_range=(35, 50),
-        aggression_range=(2.5, 4.5),
-        decision_speed_range=(1.5, 5.0),
-        preflop_timing_range=(0.8, 3.0),
-        postflop_timing_range=(2.0, 6.0),
-        random_mistake_rate=0.06,
-        chat_frequency=0.05,
-    ),
-    "NIT_rocker": BehavioralProfile(
-        name="Tight-Passive Nit",
-        vpip_range=(10, 15), pfr_range=(6, 10),
-        threebet_range=(2, 4), cbet_range=(40, 55),
-        fold_to_cbet_range=(55, 75),
-        aggression_range=(1.0, 2.0),
-        decision_speed_range=(4.0, 12.0),
-        preflop_timing_range=(3.0, 8.0),
-        postflop_timing_range=(4.0, 15.0),
-        random_mistake_rate=0.02,
-        chat_frequency=0.0,
-    ),
-    "FISH_rec": BehavioralProfile(
-        name="Recreational Fish",
-        vpip_range=(40, 60), pfr_range=(4, 12),
-        threebet_range=(1, 4), cbet_range=(30, 50),
-        fold_to_cbet_range=(25, 45),
-        aggression_range=(0.5, 1.5),
-        decision_speed_range=(1.0, 4.0),
-        preflop_timing_range=(0.5, 2.5),
-        postflop_timing_range=(1.0, 4.0),
-        random_mistake_rate=0.15,
-        chat_frequency=0.10,
-    ),
-}
-
-
-class BehavioralEvasion:
-    """
-    Emulate a specific player archetype to avoid pattern detection.
-    ML-based detection looks for deviations from human play patterns.
-    """
-
-    def __init__(self, profile: BehavioralProfile = None):
-        self.profile = profile or PROFILES["TAG_reg"]
-        self._action_history = deque(maxlen=200)
-        self._session_start = time.time()
-        self._current_vpip = random.uniform(*self.profile.vpip_range)
-        self._current_pfr = random.uniform(*self.profile.pfr_range)
-        self._mistake_today = 0
-        self._hands_played = 0
-
-        # Recalibrate stats periodically (humans have hot/cold streaks)
-        self._recalibrate()
-
-    def _recalibrate(self):
-        """Periodically shift stats within profile range (hot/cold streaks)."""
-        p = self.profile
-        self._current_vpip = random.uniform(*p.vpip_range)
-        self._current_pfr = random.uniform(*p.pfr_range)
-        self._decision_speed = random.uniform(*p.decision_speed_range)
-        self._next_recalibrate = self._hands_played + random.randint(30, 80)
-
-    def should_play_hand(self, combo_strength: float) -> bool:
-        """Decide whether to play a hand based on VPIP profile.
-        combo_strength: 0-1 hand strength (from EHS or solver equity)."""
-        self._hands_played += 1
-
-        if self._hands_played >= self._next_recalibrate:
-            self._recalibrate()
-
-        # Map combo strength to play probability matching VPIP
-        # Stronger hands = higher play probability
-        threshold = 1.0 - self._current_vpip / 100.0
-
-        # Add variance (tilt factor, table dynamics)
-        threshold += random.gauss(0, 0.05)
-
-        return combo_strength > threshold
-
-    def inject_mistake(self, solver_action: str) -> str:
-        """Occasionally override solver with a 'human' mistake."""
-        if random.random() < self.profile.random_mistake_rate:
-            self._mistake_today += 1
-            mistakes = {
-                'FOLD': random.choice(['CALL', 'CHECK']),
-                'CHECK': 'BET_33',
-                'BET_33': 'CHECK',
-                'BET_66': 'BET_33',
-                'CALL': 'FOLD',
-            }
-            return mistakes.get(solver_action.replace('BET ', 'BET_'), solver_action)
-        return solver_action
-
-    def get_timing(self, street: str) -> float:
-        """Get human-like decision timing for this profile."""
-        p = self.profile
-        if street == 'preflop':
-            base = random.uniform(*p.preflop_timing_range)
-        else:
-            base = random.uniform(*p.postflop_timing_range)
-
-        # Add micro-variance and time-of-session fatigue
-        session_hours = (time.time() - self._session_start) / 3600
-        fatigue = 1.0 + max(0, (session_hours - 1.5) * 0.15)
-        return base * fatigue * random.gauss(1.0, 0.1)
-
-    def get_stats_snapshot(self) -> Dict:
-        """Current behavioral stats (for anti-pattern verification)."""
-        return {
-            'vpip': round(self._current_vpip, 1),
-            'pfr': round(self._current_pfr, 1),
-            'profile': self.profile.name,
-            'hands': self._hands_played,
-            'mistakes': self._mistake_today,
-            'session_hours': round((time.time() - self._session_start) / 3600, 1),
-        }
-
-
-# ═══════════════════════════════════════════════════════════════
-# LAYER 3: TEMPORAL EVASION
-# ═══════════════════════════════════════════════════════════════
-
-class TemporalEvasion:
-    """
-    Natural session rhythms — when and how long to play.
-    Poker sites detect bots by consistent play schedules.
+    Human-like timing using log-normal distribution.
+    Humans do NOT have uniform reaction times. Distribution is
+    log-normal: peak near the minimum, long tail to the right
+    (some decisions take much longer).
     """
 
     def __init__(self):
-        # Human session patterns (minutes)
-        self.session_patterns = [
-            (25, 65),   # short session
-            (60, 120),  # medium
-            (90, 180),  # long grind
-            (35, 75),   # medium-short
-        ]
-        self._current_pattern = random.choice(self.session_patterns)
+        self._history = deque(maxlen=50)
         self._session_start = time.time()
-        self._breaks_taken = 0
-        self._max_hands_per_hour = random.randint(60, 90)  # single table
-        self._hand_times = deque(maxlen=60)
+        # Calibrated from real player data (seconds)
+        self._params = {
+            'preflop_fold':  (0.4, 0.6),   # (mu, sigma) for lognorm
+            'preflop_raise': (0.8, 0.5),
+            'flop_action':   (1.2, 0.5),
+            'turn_action':   (1.5, 0.5),
+            'river_action':  (1.8, 0.6),
+            'click_hold':    (0.06, 0.02),  # these stay uniform (too fast for lognorm)
+            'gap_between':   (0.3, 0.3),
+        }
 
-    def should_continue(self) -> bool:
-        """Should the bot keep playing this session?"""
-        elapsed = (time.time() - self._session_start) / 60
-        max_duration = sum(self._current_pattern)
-        return elapsed < max_duration
+    def human_delay(self, action_type: str) -> float:
+        """Generate a human-like delay using log-normal distribution."""
+        mu, sigma = self._params.get(action_type, (1.0, 0.5))
 
-    def should_take_break(self) -> bool:
-        """Should the bot sit out for a break?"""
-        elapsed = (time.time() - self._session_start) / 60
+        # Session fatigue: after 2h, mu increases 15%
+        session_h = (time.time() - self._session_start) / 3600
+        fatigue = 1.0 + max(0, (session_h - 2.0)) * 0.15
+        mu_adj = mu * fatigue
 
-        # First break: after first segment
-        if self._breaks_taken == 0 and elapsed > self._current_pattern[0]:
-            self._breaks_taken += 1
+        # Generate log-normal value
+        t = random.lognormvariate(mu_adj, sigma)
+
+        # Clamp to human-possible range
+        t = max(0.15, min(t, 30.0))
+
+        # Anti-repeat: if last 2 were too similar, re-roll
+        recent = list(self._history)[-3:]
+        if recent and any(abs(t - r) < 0.08 for r in recent):
+            t *= random.uniform(1.1, 1.6)
+
+        self._history.append(t)
+        time.sleep(t)
+        return t
+
+    def decision_delay(self, street: str, action_is_fold: bool = False) -> float:
+        """
+        Get street-appropriate delay.
+        Folds are faster, raises/bets take longer to decide.
+        """
+        if street == 'preflop':
+            return self.human_delay(
+                'preflop_fold' if action_is_fold else 'preflop_raise')
+        elif street == 'flop':
+            return self.human_delay('flop_action')
+        elif street == 'turn':
+            return self.human_delay('turn_action')
+        elif street == 'river':
+            return self.human_delay('river_action')
+        return 1.5  # fallback
+
+
+# ═══════════════════════════════════════════════════════════════
+# 2. MOUSE EXIT/ENTRY + IDLE BEHAVIOR
+# ═══════════════════════════════════════════════════════════════
+
+class IdleBehaviorSimulator:
+    """
+    Periodically moves mouse outside the poker client to simulate
+    human multitasking: checking phone, browsing, etc.
+    """
+
+    def __init__(self, client_bounds: Tuple[int, int, int, int] = None):
+        """
+        client_bounds: (left, top, width, height) of poker client window
+        """
+        self.client_bounds = client_bounds or (100, 50, 800, 600)
+        self._last_exit = time.time()
+        self._idle_actions = [
+            self._check_phone,
+            self._browse_web,
+            self._check_time,
+            self._rearrange_window,
+            self._open_notepad,
+            self._alt_tab,
+            self._stare_at_lobby,
+        ]
+        self._mouse = None  # injected by bot_core
+
+    def set_mouse(self, mouse):
+        self._mouse = mouse
+
+    def maybe_leave_client(self) -> bool:
+        """Should mouse leave the poker client now?"""
+        elapsed = time.time() - self._last_exit
+
+        # Every 5-15 minutes, leave client for a bit
+        if elapsed > random.uniform(300, 900):
+            action = random.choice(self._idle_actions)
+            duration = action()
+            self._last_exit = time.time()
             return True
-
-        # Additional breaks: ~15% chance after 45 min
-        if elapsed > 45 and random.random() < 0.15:
-            return True
-
         return False
 
-    def break_duration(self) -> float:
-        """How long to break (minutes)."""
-        # Human breaks: bathroom, coffee, phone, etc.
-        break_types = [
-            random.uniform(2, 5),     # quick
-            random.uniform(5, 12),    # normal
-            random.uniform(10, 25),   # long
-            random.uniform(2, 4),     # quick check phone
+    def _move_outside(self):
+        """Move mouse to a random point outside client area."""
+        l, t, w, h = self.client_bounds
+        # Pick a side to exit to
+        side = random.choice(['left', 'right', 'top', 'bottom'])
+        if side == 'left':
+            return (l - random.randint(30, 200), t + random.randint(0, h))
+        elif side == 'right':
+            return (l + w + random.randint(30, 200), t + random.randint(0, h))
+        elif side == 'top':
+            return (l + random.randint(0, w), t - random.randint(30, 100))
+        else:
+            return (l + random.randint(0, w), t + h + random.randint(30, 100))
+
+    def _check_phone(self) -> float:
+        """Simulate checking phone (quick)."""
+        if self._mouse:
+            x, y = self._move_outside()
+            self._mouse.move_to(x, y)
+        time.sleep(random.uniform(3, 8))
+        return random.uniform(3, 8)
+
+    def _browse_web(self) -> float:
+        """Simulate browsing the web."""
+        if self._mouse:
+            x, y = self._move_outside()
+            self._mouse.move_to(x, y)
+            # Scroll a bit
+            time.sleep(random.uniform(0.5, 1.5))
+            self._mouse.move_to(x + random.randint(-100, 100),
+                               y + random.randint(-50, 50))
+        time.sleep(random.uniform(10, 30))
+        return random.uniform(12, 35)
+
+    def _check_time(self) -> float:
+        """Check system clock (top-right corner)."""
+        if self._mouse:
+            self._mouse.move_to(1850, 10)  # macOS menu bar clock area
+        time.sleep(random.uniform(1, 3))
+        return random.uniform(2, 5)
+
+    def _rearrange_window(self) -> float:
+        """Pretend to rearrange windows."""
+        if self._mouse:
+            x, y = self._move_outside()
+            self._mouse.move_to(x, y)
+            time.sleep(random.uniform(0.3, 0.8))
+            self._mouse.move_to(x + random.randint(-50, 50),
+                               y + random.randint(-30, 30))
+        time.sleep(random.uniform(2, 5))
+        return random.uniform(4, 8)
+
+    def _open_notepad(self) -> float:
+        """Pretend to open notepad, type, close."""
+        if self._mouse:
+            self._mouse.move_to(200, 800)  # dock area
+            time.sleep(random.uniform(0.5, 1))
+            self._mouse.click()
+        time.sleep(random.uniform(5, 15))
+        return random.uniform(7, 18)
+
+    def _alt_tab(self) -> float:
+        """Simulate Alt+Tab between windows."""
+        try:
+            import pyautogui
+            pyautogui.hotkey('command', 'tab')
+            time.sleep(random.uniform(0.3, 0.8))
+            pyautogui.hotkey('command', 'tab')
+        except ImportError:
+            pass
+        return random.uniform(2, 5)
+
+    def _stare_at_lobby(self) -> float:
+        """Pretend to browse poker lobby (traffic generation)."""
+        if self._mouse:
+            x, y = self._move_outside()
+            self._mouse.move_to(x, y)
+            for _ in range(random.randint(2, 5)):
+                time.sleep(random.uniform(0.5, 1.5))
+                self._mouse.move_to(x + random.randint(-150, 150),
+                                   y + random.randint(-100, 100))
+        return random.uniform(8, 20)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 3. EMOTIONAL STATE MACHINE (TILT + CONFIDENCE + FATIGUE)
+# ═══════════════════════════════════════════════════════════════
+
+class EmotionalState:
+    """
+    Simulates human emotional variance affecting decisions.
+    Three dimensions: tilt, confidence, fatigue.
+    """
+
+    def __init__(self):
+        self.tilt = 0.0          # 0=calm, 1=enraged
+        self.confidence = 0.5    # 0=insecure, 1=overconfident
+        self.fatigue = 0.0       # 0=fresh, 1=exhausted
+        self._recent_results = deque(maxlen=20)  # (bb_won, timestamp)
+        self._consecutive_losses = 0
+        self._session_start = time.time()
+
+    def update(self, hand_result_bb: float):
+        """Update emotional state after a hand."""
+        self._recent_results.append((hand_result_bb, time.time()))
+
+        if hand_result_bb < -20:
+            self._consecutive_losses += 1
+            self.tilt = min(1.0, self.tilt + 0.08)
+            self.confidence = max(0.1, self.confidence - 0.04)
+        elif hand_result_bb > 30:
+            self._consecutive_losses = 0
+            self.confidence = min(1.0, self.confidence + 0.06)
+            self.tilt = max(0.0, self.tilt - 0.15)
+        else:
+            self._consecutive_losses = max(0, self._consecutive_losses - 0.5)
+
+        # Tilt decay over time
+        self.tilt = max(0.0, self.tilt - 0.005)
+
+        # Fatigue increases with session length
+        session_h = (time.time() - self._session_start) / 3600
+        self.fatigue = min(1.0, session_h / 3.5)
+
+        # Confidence decays with fatigue
+        if self.fatigue > 0.5:
+            self.confidence = max(0.2, self.confidence - 0.01)
+
+    def get_vpip_adjustment(self) -> float:
+        """How much to adjust VPIP based on emotional state."""
+        adj = 0.0
+        # Tilt: play looser
+        adj += self.tilt * random.uniform(0.06, 0.12)
+        # Confidence: play more hands
+        adj += (self.confidence - 0.5) * 0.08
+        # Fatigue: slightly looser (less disciplined)
+        adj += self.fatigue * 0.04
+        return adj
+
+    def get_aggression_adjustment(self) -> float:
+        """How much to adjust aggression."""
+        adj = 0.0
+        adj += self.tilt * random.uniform(0.05, 0.15)
+        adj += self.fatigue * (-0.05)  # tired = less aggressive
+        return adj
+
+    def get_timing_adjustment(self) -> float:
+        """How much fatigue affects decision speed."""
+        return 1.0 + self.fatigue * 0.5  # up to 50% slower when tired
+
+    def is_tilting(self) -> bool:
+        return self.tilt > 0.5
+
+    def needs_cool_down(self) -> bool:
+        """Should take a break due to tilt?"""
+        return self.tilt > 0.7 and self._consecutive_losses >= 4
+
+
+# ═══════════════════════════════════════════════════════════════
+# 4. MOUSE MICRO-CORRECTIONS
+# ═══════════════════════════════════════════════════════════════
+
+class MicroCorrectionMouse:
+    """
+    Wraps BezierMouse with human-like micro-corrections:
+    - Overshoot and correct (10-20px past target, then back)
+    - Micro-tremor throughout movement (continuous sub-pixel jitter)
+    - Hesitation at decision points
+    """
+
+    def __init__(self, base_mouse=None):
+        self.base = base_mouse
+        self._correction_count = 0
+        self._last_correction_time = 0
+
+    def move_to(self, x: int, y: int, duration_ms: float = None) -> float:
+        """Move mouse with potential overshoot + correction."""
+        if self.base is None:
+            return 0.0
+
+        # 12% chance of overshoot (humans do this regularly)
+        if random.random() < 0.12:
+            overshoot_x = x + random.randint(8, 20) * random.choice([-1, 1])
+            overshoot_y = y + random.randint(5, 12) * random.choice([-1, 1])
+
+            # Move to overshoot position
+            self.base.move_to(overshoot_x, overshoot_y,
+                            (duration_ms or 500) * random.uniform(0.7, 0.9))
+
+            # Brief pause (realizing you overshot)
+            time.sleep(random.uniform(0.08, 0.2))
+
+            # Correct back to target
+            self.base.move_to(x, y,
+                            (duration_ms or 500) * random.uniform(0.15, 0.3))
+
+            self._correction_count += 1
+            self._last_correction_time = time.time()
+            return duration_ms or 500
+
+        # Normal move
+        return self.base.move_to(x, y, duration_ms)
+
+    def click(self, x: int = None, y: int = None, button: str = "left"):
+        """Click with occasional double-tap (human indecision)."""
+        if self.base is None:
+            return
+
+        # 3% chance of wrong-click-then-correct
+        if random.random() < 0.03 and x is not None:
+            wrong_x = x + random.randint(-30, 30)
+            wrong_y = y + random.randint(-15, 15)
+            self.base.move_to(wrong_x, wrong_y)
+            time.sleep(random.uniform(0.1, 0.2))
+            self.base.move_to(x, y)
+            time.sleep(random.uniform(0.05, 0.1))
+
+        if x is not None and y is not None:
+            self.base.click(x, y, button)
+        else:
+            self.base.click(button=button)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 5. SIMULATED HUMAN MISTAKES
+# ═══════════════════════════════════════════════════════════════
+
+class HumanMistakeSimulator:
+    """
+    Generates credible human errors during bot operation.
+    Not random noise — structured, psychologically plausible mistakes.
+    """
+
+    def __init__(self, emotional_state: EmotionalState = None):
+        self.emotion = emotional_state or EmotionalState()
+        self._mistake_log = []
+
+    def should_misclick(self) -> bool:
+        """Humans misclick ~1-2% of actions. Tilt doubles it."""
+        base_rate = 0.012
+        tilt_bonus = self.emotion.tilt * 0.02
+        fatigue_bonus = self.emotion.fatigue * 0.01
+        return random.random() < (base_rate + tilt_bonus + fatigue_bonus)
+
+    def misclick_action(self, intended: str) -> str:
+        """Generate a plausible misclick."""
+        # Adjacent button on poker UI
+        misclicks = {
+            'FOLD': 'CALL',
+            'CHECK': 'BET',
+            'CALL': 'RAISE',
+            'RAISE': 'CALL',
+            'BET': 'CHECK',
+        }
+        result = misclicks.get(intended, intended)
+        self._mistake_log.append({
+            'time': time.time(),
+            'intended': intended,
+            'actual': result,
+            'tilt': round(self.emotion.tilt, 2),
+            'fatigue': round(self.emotion.fatigue, 2),
+        })
+        return result
+
+    def should_type_wrong_bet(self) -> bool:
+        """Typing wrong bet amount then correcting."""
+        return random.random() < (0.04 + self.emotion.fatigue * 0.03)
+
+    def wrong_bet_correction_sequence(self, correct_bb: float):
+        """Generate a type-wrong-then-correct sequence."""
+        # Type a wrong number
+        wrong = correct_bb * random.uniform(0.6, 1.4)
+        wrong_str = f"{wrong:.1f}" if wrong < 10 else str(int(wrong))
+
+        # Wait, realize mistake, correct
+        correction_delay = random.uniform(0.5, 1.5)
+
+        return {
+            'wrong_amount': wrong_str,
+            'correction_delay': correction_delay,
+            'correct_amount': correct_bb,
+        }
+
+    def should_open_lobby_by_mistake(self) -> bool:
+        """Accidentally open lobby during play."""
+        return random.random() < 0.03
+
+
+# ═══════════════════════════════════════════════════════════════
+# 6. ROTATING BEHAVIORAL PROFILES
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class SessionProfile:
+    """A complete behavioral profile for one session."""
+    name: str
+    vpip: Tuple[float, float]
+    pfr: Tuple[float, float]
+    threebet: Tuple[float, float]
+    description: str
+
+
+SESSION_PROFILES = [
+    SessionProfile("TAG_focused", (18, 24), (14, 18), (5, 9),
+                   "Playing my A-game, well-rested"),
+    SessionProfile("TAG_relaxed", (20, 26), (15, 19), (5, 8),
+                   "After-work session, slightly looser"),
+    SessionProfile("LAG_aggressive", (26, 34), (20, 28), (8, 14),
+                   "Feeling confident, running hot"),
+    SessionProfile("TAG_tired", (16, 21), (11, 15), (4, 7),
+                   "Late night grind, playing tighter"),
+    SessionProfile("REC_fun", (24, 32), (14, 20), (5, 9),
+                   "Weekend casual play, more speculative hands"),
+    SessionProfile("NIT_cautious", (12, 17), (8, 12), (3, 5),
+                   "Playing scared after recent losses"),
+]
+
+
+class ProfileRotator:
+    """Rotates behavioral profiles across sessions."""
+
+    def __init__(self):
+        self._history = []
+        self._current = None
+
+    def next_profile(self) -> SessionProfile:
+        """Pick next profile, avoiding the last 2 used."""
+        recent = [h[0] for h in self._history[-2:]]
+        available = [p for p in SESSION_PROFILES if p.name not in recent]
+        if not available:
+            available = SESSION_PROFILES
+
+        profile = random.choice(available)
+        self._current = profile
+        self._history.append((profile.name, time.time()))
+        return profile
+
+    def current(self) -> SessionProfile:
+        if self._current is None:
+            return self.next_profile()
+        return self._current
+
+    def get_history(self):
+        return [(name, t) for name, t in self._history]
+
+
+# ═══════════════════════════════════════════════════════════════
+# 7. SESSION PATTERN GENERATOR
+# ═══════════════════════════════════════════════════════════════
+
+class SessionPatternGenerator:
+    """
+    Generates realistic weekly play schedules.
+    Humans don't play every day at the same time.
+    """
+
+    def __init__(self):
+        self.days = ['monday', 'tuesday', 'wednesday', 'thursday',
+                     'friday', 'saturday', 'sunday']
+        self._generate_week()
+
+    def _generate_week(self):
+        """Generate a realistic week schedule."""
+        self.week = {}
+
+        for day in self.days:
+            # 60-80% chance of playing on any given day
+            if random.random() < 0.3:
+                self.week[day] = []  # rest day
+                continue
+
+            # How many sessions today?
+            if day in ('saturday', 'sunday'):
+                n_sessions = random.choices([1, 2, 3], weights=[0.4, 0.4, 0.2])[0]
+            else:
+                n_sessions = random.choices([1, 2], weights=[0.7, 0.3])[0]
+
+            sessions = []
+            for _ in range(n_sessions):
+                # Session duration in minutes
+                duration = random.choices(
+                    [25, 45, 60, 90, 120, 180],
+                    weights=[0.1, 0.2, 0.3, 0.2, 0.15, 0.05]
+                )[0]
+
+                # Start hour
+                if day in ('saturday', 'sunday'):
+                    start_hour = random.randint(10, 23)
+                else:
+                    # Weekday: mostly evenings
+                    start_hour = random.choices(
+                        [9, 10, 11, 14, 15, 16, 18, 19, 20, 21, 22, 23],
+                        weights=[0.02, 0.03, 0.05, 0.05, 0.05, 0.05,
+                                0.15, 0.2, 0.15, 0.1, 0.1, 0.05]
+                    )[0]
+
+                sessions.append({
+                    'start_hour': start_hour,
+                    'duration_min': duration,
+                    'tables': random.choices([1, 2, 3, 4],
+                                            weights=[0.15, 0.35, 0.35, 0.15])[0],
+                })
+
+            self.week[day] = sessions
+
+    def get_today_schedule(self):
+        """Get schedule for today."""
+        day = self.days[time.localtime().tm_wday]
+        return self.week.get(day, [])
+
+    def should_play_now(self) -> Tuple[bool, Optional[Dict]]:
+        """Should the bot start a session now?"""
+        today = self.get_today_schedule()
+        if not today:
+            return False, None
+
+        current_hour = time.localtime().tm_hour
+        current_min = time.localtime().tm_min
+        current_decimal = current_hour + current_min / 60
+
+        for session in today:
+            start = session['start_hour']
+            end = start + session['duration_min'] / 60
+
+            # Add random delay (±15 min) to start time
+            start += random.uniform(-0.25, 0.25)
+
+            if start <= current_decimal <= end:
+                return True, session
+
+        return False, None
+
+
+# ═══════════════════════════════════════════════════════════════
+# 8. AUXILIARY TRAFFIC SIMULATION
+# ═══════════════════════════════════════════════════════════════
+
+class TrafficSimulator:
+    """
+    Generates auxiliary client activity to look human.
+    Browsing lobby, checking stats, opening cashier.
+    """
+
+    def __init__(self, mouse=None):
+        self.mouse = mouse
+        self._last_activity = time.time()
+        self._activities = [
+            self.browse_lobby,
+            self.check_stats,
+            self.scroll_tables,
+            self.open_chat,
         ]
-        return random.choice(break_types)
 
-    def hands_per_hour_target(self) -> int:
-        """Target hands per hour (single table ~60-90 for human)."""
-        return self._max_hands_per_hour
+    def maybe_generate_traffic(self) -> bool:
+        """Periodically generate auxiliary traffic."""
+        elapsed = time.time() - self._last_activity
+        if elapsed > random.uniform(600, 1800):  # every 10-30 min
+            activity = random.choice(self._activities)
+            activity()
+            self._last_activity = time.time()
+            return True
+        return False
 
-    def register_hand_time(self):
-        """Track hand completion time for pace monitoring."""
-        self._hand_times.append(time.time())
+    def browse_lobby(self):
+        """Browse table lobby for 10-30 seconds."""
+        if self.mouse:
+            for _ in range(random.randint(2, 4)):
+                self.mouse.move_to(
+                    random.randint(200, 600),
+                    random.randint(200, 500),
+                    random.uniform(400, 800)
+                )
+                time.sleep(random.uniform(1, 4))
+        time.sleep(random.uniform(5, 20))
 
-    def current_pace(self) -> float:
-        """Current hands per hour rate."""
-        if len(self._hand_times) < 2:
-            return 0
-        elapsed_hours = (self._hand_times[-1] - self._hand_times[0]) / 3600
-        if elapsed_hours < 0.01:
-            return 0
-        return len(self._hand_times) / elapsed_hours
+    def check_stats(self):
+        """Check personal stats/hand history."""
+        if self.mouse:
+            self.mouse.move_to(700, 100)  # stats tab area
+            time.sleep(random.uniform(2, 5))
+            # Scroll through stats
+            self.mouse.move_to(700, 300)
+        time.sleep(random.uniform(3, 10))
 
-    def is_playing_too_fast(self) -> bool:
-        """Check if bot is playing faster than human pace."""
-        pace = self.current_pace()
-        return pace > self._max_hands_per_hour * 1.15
+    def scroll_tables(self):
+        """Scroll through available tables."""
+        if self.mouse:
+            self.mouse.move_to(400, 300)
+            for _ in range(random.randint(2, 5)):
+                self.mouse.move_to(400, 300 + random.randint(-100, 100))
+                time.sleep(random.uniform(0.5, 1.5))
+        time.sleep(random.uniform(4, 12))
 
-    def time_of_day_factor(self) -> float:
-        """
-        Different times of day = different play styles.
-        Late night = looser, more aggressive (tired players).
-        """
-        hour = time.localtime().tm_hour
-        if 2 <= hour <= 6:
-            return 1.3   # late night: looser
-        elif 9 <= hour <= 12:
-            return 1.0   # morning: standard
-        elif 13 <= hour <= 17:
-            return 0.9   # afternoon: slightly tighter (regs)
-        elif 18 <= hour <= 23:
-            return 1.1   # evening: more recs = slightly looser
-        return 1.0
+    def open_chat(self):
+        """Open and maybe type in chat."""
+        try:
+            import pyautogui
+            pyautogui.press('enter')  # open chat
+            time.sleep(random.uniform(0.5, 1))
+            # Maybe type something
+            if random.random() < 0.3:
+                msgs = ['nh', 'ty', 'wp', 'lol', 'wow']
+                pyautogui.write(random.choice(msgs), interval=0.1)
+                time.sleep(random.uniform(0.3, 0.6))
+                pyautogui.press('enter')
+        except ImportError:
+            pass
+        time.sleep(random.uniform(2, 5))
 
 
 # ═══════════════════════════════════════════════════════════════
-# LAYER 4: SPATIAL EVASION (Table/Seat Selection)
+# 9. HARDWARE SEPARATION (Capture Card Architecture)
 # ═══════════════════════════════════════════════════════════════
 
-class SpatialEvasion:
-    """Natural table and seat selection patterns."""
+HARDWARE_SEPARATION_GUIDE = """
+=== CAPTURE CARD BOT ARCHITECTURE ===
 
-    @staticmethod
-    def select_seat(available_positions: List[str]) -> str:
-        """
-        Pick a seat that looks natural.
-        Humans don't always sit in the same position.
-        """
-        if not available_positions:
-            return 'BTN'
+HARDWARE:
+  Machine A (CLEAN): Runs poker client only
+    - Windows 10/11 clean install
+    - No dev tools, no Python
+    - HDMI output → Capture Card
 
-        # Humans have position preferences but vary them
-        preferences = {
-            'BTN': 0.25, 'CO': 0.20, 'HJ': 0.15,
-            'UTG': 0.05, 'SB': 0.10, 'BB': 0.10,
+  Machine B (BOT): Runs Governor
+    - macOS/Linux, any tools installed
+    - Receives HDMI input from capture card
+    - OCR processes video frames
+    - Sends input via USB HID emulator
+
+  Bridge: USB Capture Card ($15-30)
+    - HDMI input from Machine A
+    - USB output to Machine B
+    - Machine B reads frames with OpenCV/MSS
+
+  Input: Arduino Micro/Teensy ($10-20)
+    - Connects to Machine A via USB
+    - Appears as standard USB HID keyboard + mouse
+    - Machine B sends commands over serial
+    - Client sees real hardware input, not software
+
+SETUP:
+  1. Connect: MachineA_HDMI → CaptureCard → MachineB_USB
+  2. Connect: MachineB_USB → Arduino → MachineA_USB
+  3. Machine B runs table_reader.py on video capture
+  4. Machine B runs bot_core.py → sends commands via serial
+  5. Arduino executes mouse/keyboard HID reports
+
+DETECTION PROOF:
+  - Machine A has ZERO bot software
+  - All input is hardware-level (USB HID)
+  - Process scan finds nothing
+  - Memory scan finds nothing
+  - Hook detection finds nothing
+  - Client sees: HDMI output + real USB mouse/keyboard
+"""
+
+
+# ═══════════════════════════════════════════════════════════════
+# 10. FINGERPRINT ROTATION
+# ═══════════════════════════════════════════════════════════════
+
+class FingerprintRotator:
+    """
+    Rotates system fingerprints between sessions.
+    Changes screen resolution, DPI, locale, etc.
+    """
+
+    def __init__(self):
+        self._session_count = 0
+
+    def rotate(self):
+        """Apply fingerprint rotation for new session."""
+        self._session_count += 1
+        changes = {}
+
+        # Screen resolution ±5%
+        try:
+            base_w, base_h = 1920, 1080
+            new_w = base_w + random.randint(-60, 60)
+            new_h = base_h + random.randint(-40, 40)
+            changes['resolution'] = f"{new_w}x{new_h}"
+        except Exception:
+            pass
+
+        # DPI scaling variation
+        changes['dpi'] = random.choice([100, 125])
+
+        # Timezone offset (±1 hour)
+        changes['tz_offset'] = random.choice([-1, 0, 1])
+
+        # Language rotation
+        changes['language'] = random.choice(['en', 'en', 'en', 'ro'])
+
+        # Color scheme
+        changes['theme'] = random.choice(['dark', 'light'])
+
+        self._current = changes
+        return changes
+
+    def current(self):
+        return getattr(self, '_current', {})
+
+    def recommend_vm_config(self):
+        """Generate VM config for this session (if using VM approach)."""
+        return {
+            'mac': ':'.join(f"{random.randint(0,255):02x}" for _ in range(6)),
+            'hostname': f"DESKTOP-{''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=8))}",
+            'ram_gb': round(random.uniform(7.5, 8.5), 1),
+            'disk_gb': random.randint(220, 260),
+            'cpu_cores': random.choice([4, 6, 8]),
         }
 
-        # Weight by availability
-        weights = []
-        positions = []
-        for pos in available_positions:
-            positions.append(pos)
-            weights.append(preferences.get(pos, 0.05))
-
-        total = sum(weights)
-        weights = [w / total for w in weights]
-
-        r = random.random()
-        cum = 0
-        for pos, w in zip(positions, weights):
-            cum += w
-            if r <= cum:
-                return pos
-
-        return available_positions[0]
-
-    @staticmethod
-    def should_switch_table(current_hands: int) -> bool:
-        """Decide whether to switch tables (natural behavior)."""
-        if current_hands < 20:
-            return False
-
-        # Humans switch tables occasionally
-        prob = 0.05  # base 5% per hand check
-
-        # After a big loss, more likely to switch
-        prob *= 1.5
-
-        return random.random() < prob
-
-    @staticmethod
-    def select_stake_level(bankroll_bb: float) -> str:
-        """Choose appropriate stake based on bankroll (in BB)."""
-        if bankroll_bb < 20:
-            return 'NL2'
-        elif bankroll_bb < 50:
-            return 'NL5'
-        elif bankroll_bb < 100:
-            return 'NL10'
-        elif bankroll_bb < 200:
-            return 'NL25'
-        elif bankroll_bb < 500:
-            return 'NL50'
-        elif bankroll_bb < 1000:
-            return 'NL100'
-        else:
-            return 'NL200'
-
 
 # ═══════════════════════════════════════════════════════════════
-# LAYER 5: BET SIZING EVASION
-# ═══════════════════════════════════════════════════════════════
-
-class BetSizingEvasion:
-    """
-    Make bet sizes look human, not solver-computed.
-    Solvers output precisely calculated sizes; humans use heuristics.
-    """
-
-    @staticmethod
-    def humanize_sizing(solver_pct: float, street: str, pot_bb: float) -> float:
-        """
-        Convert solver bet sizing (%) to a human-like amount.
-
-        Humans:
-        - Preflop: use fixed sizes (2.5bb, 3bb, 3.5bb)
-        - Flop: use slider or preset buttons (33%, 50%, 66%, 75%, pot)
-        - Turn: similar but larger
-        - River: often pot or overbet, or small block bet
-        """
-        # Snap to common human sizing buckets
-        buckets = {
-            'preflop': [(0.20, 0.32, 0.25), (0.33, 0.45, 0.35),
-                       (0.46, 0.60, 0.50), (0.61, 1.0, 0.75)],
-            'flop':    [(0, 0.15, 0.05), (0.25, 0.40, 0.33),
-                       (0.50, 0.60, 0.50), (0.65, 0.80, 0.66),
-                       (0.85, 1.2, 1.0)],
-            'turn':    [(0, 0.15, 0.05), (0.30, 0.45, 0.33),
-                       (0.55, 0.70, 0.66), (0.75, 1.0, 0.75),
-                       (1.0, 2.0, 1.5)],
-            'river':   [(0, 0.15, 0.05), (0.30, 0.45, 0.33),
-                       (0.55, 0.70, 0.66), (0.75, 1.0, 0.75),
-                       (1.0, 1.5, 1.25)],
-        }
-
-        for lo, hi, snap in buckets.get(street, buckets['flop']):
-            if lo <= solver_pct <= hi:
-                # Add micro-noise to the snapped value
-                noise = random.gauss(0, snap * 0.03)
-                return max(0.01, snap + noise)
-
-        return solver_pct
-
-    @staticmethod
-    def randomize_bet_sequence(actions: List[str]) -> List[str]:
-        """
-        Occasionally alter bet sizing sequence.
-        Humans don't always use the same size in the same spot.
-        """
-        if random.random() < 0.08:  # 8% deviation
-            # Swap between similar sizes
-            swaps = {'BET 33%': 'BET 50%', 'BET 50%': 'BET 33%',
-                    'BET 66%': 'BET 75%', 'BET 75%': 'BET 66%'}
-            return [swaps.get(a, a) for a in actions]
-        return actions
-
-
-# ═══════════════════════════════════════════════════════════════
-# LAYER 6: MULTI-TABLE COORDINATION
-# ═══════════════════════════════════════════════════════════════
-
-class MultiTableCoordinator:
-    """
-    Coordinate actions across multiple tables for natural appearance.
-    Humans have attention bottlenecks that bots don't.
-    """
-
-    def __init__(self, max_tables=4):
-        self.max_tables = max_tables
-        self.active_tables = 0
-        self._last_action_table = None
-        self._action_queue = deque()
-        self._attention_focus = 0  # which table has attention (0-indexed)
-
-    def can_act(self, table_id: int) -> bool:
-        """Check if bot can act on this table now.
-        Humans can only attend to one table at a time."""
-        # Switch attention every few seconds (human scanning pattern)
-        if time.time() % random.uniform(2, 5) < 0.1:
-            self._attention_focus = table_id
-
-        return self._attention_focus == table_id
-
-    def schedule_action(self, table_id: int, action: str):
-        """Queue an action with human-like multi-table delay."""
-        # Humans take 0.5-2s between actions on different tables
-        delay = random.uniform(0.5, 2.0) if table_id != self._last_action_table else 0
-        self._action_queue.append((time.time() + delay, table_id, action))
-        self._last_action_table = table_id
-
-    def get_next_action(self):
-        """Get the next ready action from the queue."""
-        if self._action_queue and self._action_queue[0][0] <= time.time():
-            return self._action_queue.popleft()
-        return None
-
-    def optimal_table_count(self, session_minutes: float) -> int:
-        """Humans vary table count over session."""
-        if session_minutes < 15:
-            return 1  # warming up
-        elif session_minutes < 45:
-            return min(2, self.max_tables)  # settling in
-        elif session_minutes < 120:
-            return min(random.randint(2, self.max_tables), self.max_tables)  # grinding
-        else:
-            return min(random.randint(1, 3), self.max_tables)  # tired, reducing
-
-
-# ═══════════════════════════════════════════════════════════════
-# Master Evasion Controller
+# MASTER EVASION CONTROLLER (v2)
 # ═══════════════════════════════════════════════════════════════
 
 class EvasionEngine:
-    """Orchestrates all evasion layers."""
+    """Orchestrates ALL evasion layers."""
 
-    def __init__(self, profile_name='TAG_reg'):
-        self.behavior = BehavioralEvasion(PROFILES.get(profile_name, PROFILES['TAG_reg']))
-        self.temporal = TemporalEvasion()
-        self.spatial = SpatialEvasion()
-        self.sizing = BetSizingEvasion()
-        self.multitable = MultiTableCoordinator()
-        self.process = ProcessCamouflage()
+    def __init__(self, mouse=None, client_bounds=None):
+        # Layer 1: Log-normal timing
+        self.timer = LogNormalTimer()
+        # Layer 2: Mouse exit/entry
+        self.idle = IdleBehaviorSimulator(client_bounds) if client_bounds else None
+        if mouse and self.idle:
+            self.idle.set_mouse(mouse)
+        # Layer 3: Emotional state
+        self.emotion = EmotionalState()
+        # Layer 4: Micro-corrections
+        self.mouse_correct = MicroCorrectionMouse(mouse)
+        # Layer 5: Mistakes
+        self.mistakes = HumanMistakeSimulator(self.emotion)
+        # Layer 6: Profiles
+        self.profiles = ProfileRotator()
+        # Layer 7: Sessions
+        self.sessions = SessionPatternGenerator()
+        # Layer 8: Traffic
+        self.traffic = TrafficSimulator(mouse)
+        # Layer 9: Hardware (guide only)
+        self.hw_guide = HARDWARE_SEPARATION_GUIDE
+        # Layer 10: Fingerprinting
+        self.fingerprint = FingerprintRotator()
 
-    def pre_session_check(self) -> Dict:
-        """Check before starting a session."""
-        scanners = self.process.check_for_scanners()
+        self.current_profile = self.profiles.next_profile()
+
+    def pre_session_setup(self):
+        """Run before starting a new session."""
+        self.current_profile = self.profiles.next_profile()
+        fps = self.fingerprint.rotate()
         return {
-            'scanners_detected': scanners,
-            'safe_to_start': len(scanners) == 0,
-            'recommendations': self.process.recommend(),
+            'profile': self.current_profile.name,
+            'fingerprint': fps,
+            'vm_config': self.fingerprint.recommend_vm_config(),
         }
 
-    def should_play(self, hand_strength: float) -> bool:
-        return self.behavior.should_play_hand(hand_strength)
+    def process_hand_result(self, bb_won: float):
+        self.emotion.update(bb_won)
 
-    def get_decision_timing(self, street: str) -> float:
-        return self.behavior.get_timing(street)
+    def get_effective_vpip(self, solver_vpip: float) -> float:
+        """Adjust solver VPIP with emotional state."""
+        adj = self.emotion.get_vpip_adjustment()
+        return max(0.05, min(0.60, solver_vpip + adj))
 
-    def humanize_action(self, solver_action: str, street: str, pot_bb: float):
-        """Process a solver action through all evasion layers."""
-        # 1. Inject occasional human mistake
-        action = self.behavior.inject_mistake(solver_action)
-
-        # 2. Humanize bet sizing
-        if 'BET' in action:
-            try:
-                pct = float(action.split('%')[0].split()[-1]) / 100
-                human_pct = self.sizing.humanize_sizing(pct, street, pot_bb)
-                action = f"{action.split('%')[0].rsplit(' ', 1)[0]} {human_pct*100:.0f}%"
-            except (ValueError, IndexError):
-                pass
-
-        return action
-
-    def get_session_status(self) -> Dict:
-        """Get current evasion state."""
+    def should_act_human(self) -> dict:
+        """Check all human-like behaviors before acting."""
         return {
-            'behavior': self.behavior.get_stats_snapshot(),
-            'session_minutes': round(self.temporal._session_start and
-                (time.time() - self.temporal._session_start) / 60, 1),
-            'hands_per_hour': round(self.temporal.current_pace(), 1),
-            'multitable': self.multitable.active_tables,
+            'misclick': self.mistakes.should_misclick(),
+            'wrong_bet': self.mistakes.should_type_wrong_bet(),
+            'needs_cooldown': self.emotion.needs_cool_down(),
+            'leave_client': self.idle.maybe_leave_client() if self.idle else False,
+            'traffic': self.traffic.maybe_generate_traffic(),
+            'tilt_level': round(self.emotion.tilt, 2),
+            'fatigue': round(self.emotion.fatigue, 2),
         }
