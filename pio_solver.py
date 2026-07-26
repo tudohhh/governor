@@ -44,33 +44,153 @@ def bucketize(combos, n=10):
 # ── Vectorized equity matrix (uses EquityDB) ──
 
 class FastEquity:
-    """Lightning-fast equity lookup using precomputed DB."""
+    """Multi-street equity lookup. Supports flop (DB), turn (MC buckets), river (exact)."""
+
     def __init__(self, hero_c, vill_c, board, n=10):
         self.n = n
         self.hb_map = bucketize(hero_c, n)
         self.vb_map = bucketize(vill_c, n)
         self.board = list(board)
         self.combos_169 = all_combos_169()
+        self.use_db = False
+        self._m = [[0.5] * self.n for _ in range(self.n)]
 
-        # Try precomputed DB
+        n_board = len(board)
+        if n_board == 0:
+            self._init_preflop()
+        elif n_board == 3:
+            self._init_flop(hero_c, vill_c)
+        elif n_board == 4:
+            self._init_turn(hero_c, vill_c)
+        elif n_board >= 5:
+            self._init_river(hero_c, vill_c)
+
+    def _init_preflop(self):
+        """Preflop equity from EHS heuristic (fast, good enough for buckets)."""
+        h_by = defaultdict(list); v_by = defaultdict(list)
+        for c, _ in enumerate(self.hb_map): pass  # build group lists
+        for c, hb in self.hb_map.items(): h_by[hb].append(c)
+        for c, vb in self.vb_map.items(): v_by[vb].append(c)
+        for hb in range(self.n):
+            hl = h_by.get(hb, [])
+            for vb in range(self.n):
+                vl = v_by.get(vb, [])
+                if not hl or not vl:
+                    self._m[hb][vb] = 0.5
+                    continue
+                total = sum(PREFLOP_EHS.get(h, 0.5) for h in hl) / len(hl)
+                v_avg = sum(PREFLOP_EHS.get(v, 0.5) for v in vl) / len(vl)
+                self._m[hb][vb] = round(total / (total + v_avg + 0.001), 3)
+
+    def _init_flop(self, hero_c, vill_c):
+        """Flop equity from DB (precomputed) or MC fallback."""
         self.db = EquityDB()
-        self.matrix = self.db.get(board)
+        self.matrix = self.db.get(self.board)
         self.use_db = self.matrix is not None
-
         if self.use_db:
             self._init_from_db(hero_c, vill_c)
         else:
             self._init_from_scratch(hero_c, vill_c)
 
+    def _init_turn(self, hero_c, vill_c):
+        """Turn equity: MC over 47 remaining river cards, within buckets.
+        Samples random river completions and averages equity across buckets."""
+        # Build bucket → card-int lists (need actual card ints, not combo strings)
+        # For turn, convert combo strings to actual hands
+        from equity import all_cards, remove_cards
+
+        h_by = defaultdict(list); v_by = defaultdict(list)
+        for c in hero_c:
+            hb = self.hb_map.get(c, 0)
+            hands = self._combo_to_card_pairs(c)
+            h_by[hb].extend(hands)
+        for c in vill_c:
+            vb = self.vb_map.get(c, 0)
+            hands = self._combo_to_card_pairs(c)
+            v_by[vb].extend(hands)
+
+        # Remaining deck for river card
+        deck = all_cards()
+        dead = set(self.board)
+        remaining = [c for c in deck if c not in dead]
+
+        for hb in range(self.n):
+            hl = h_by.get(hb, [])
+            if not hl: continue
+            for vb in range(self.n):
+                vl = v_by.get(vb, [])
+                if not vl: continue
+                wins = ties = total = 0
+                n_river = min(47, len(remaining))
+                for _ in range(n_river):
+                    river = random.choice(remaining)
+                    # Pick random hero and villain hands (no collision with each other or board+river)
+                    hh = random.choice(hl)
+                    while (hh[0] in dead or hh[1] in dead or
+                           hh[0] == river or hh[1] == river):
+                        hh = random.choice(hl)
+                    vh = random.choice(vl)
+                    while (vh[0] in dead or vh[1] in dead or
+                           vh[0] == river or vh[1] == river or
+                           vh[0] in hh or vh[1] in hh):
+                        vh = random.choice(vl)
+
+                    fb = self.board + [river]
+                    hs = evaluator.evaluate(list(hh), fb)
+                    vs = evaluator.evaluate(list(vh), fb)
+                    if hs < vs: wins += 1
+                    elif hs == vs: ties += 1
+                    total += 1
+                self._m[hb][vb] = round((wins + ties * 0.5) / max(1, total), 3)
+
+    def _init_river(self, hero_c, vill_c):
+        """River equity: deterministic (5 known cards). Exact evaluation."""
+        from equity import all_cards, remove_cards
+
+        h_by = defaultdict(list); v_by = defaultdict(list)
+        for c in hero_c:
+            hb = self.hb_map.get(c, 0)
+            h_by[hb].extend(self._combo_to_card_pairs(c))
+        for c in vill_c:
+            vb = self.vb_map.get(c, 0)
+            v_by[vb].extend(self._combo_to_card_pairs(c))
+
+        dead = set(self.board)
+
+        for hb in range(self.n):
+            hl = h_by.get(hb, [])
+            if not hl: continue
+            for vb in range(self.n):
+                vl = v_by.get(vb, [])
+                if not vl: continue
+                wins = ties = total = 0
+                for hh in hl:
+                    if hh[0] in dead or hh[1] in dead: continue
+                    for vh in vl:
+                        if vh[0] in dead or vh[1] in dead: continue
+                        if hh[0] in vh or hh[1] in vh: continue
+                        hs = evaluator.evaluate(list(hh), self.board)
+                        vs = evaluator.evaluate(list(vh), self.board)
+                        if hs < vs: wins += 1
+                        elif hs == vs: ties += 1
+                        total += 1
+                self._m[hb][vb] = round((wins + ties * 0.5) / max(1, total), 3)
+
+    def _combo_to_card_pairs(self, combo_str):
+        """Convert combo string like 'AKs' to list of (card_int, card_int) tuples."""
+        from app import combo_to_hands
+        try:
+            return combo_to_hands(combo_str)
+        except:
+            return []
+
     def _init_from_db(self, hc, vc):
         """Build bucket-pair equity from precomputed 169×169 matrix."""
-        # Map combo → 169 index
         combo_to_idx = {}
         for idx, (name, _) in enumerate(self.combos_169):
             combo_to_idx[name] = idx
 
-        self._m = [[0.5]*self.n for _ in range(self.n)]
-        counts = [[0]*self.n for _ in range(self.n)]
+        counts = [[0] * self.n for _ in range(self.n)]
 
         for h in hc:
             hb = self.hb_map.get(h, 0)
@@ -91,23 +211,22 @@ class FastEquity:
 
     def _init_from_scratch(self, hc, vc):
         """Fallback: compute from Monte Carlo (slower)."""
-        from pio_solver import real_equity
-        self._m = [[0.5]*self.n for _ in range(self.n)]
+        self._m = [[0.5] * self.n for _ in range(self.n)]
         h_by = defaultdict(list); v_by = defaultdict(list)
-        for c in hc: h_by[self.hb_map.get(c,0)].append(c)
-        for c in vc: v_by[self.vb_map.get(c,0)].append(c)
+        for c in hc: h_by[self.hb_map.get(c, 0)].append(c)
+        for c in vc: v_by[self.vb_map.get(c, 0)].append(c)
 
         for hbi in range(self.n):
-            hl = h_by.get(hbi,[])
+            hl = h_by.get(hbi, [])
             if not hl: continue
             for vbi in range(self.n):
-                vl = v_by.get(vbi,[])
+                vl = v_by.get(vbi, [])
                 if not vl: continue
                 total = count = 0
-                for _ in range(min(20, len(hl)*len(vl))):
+                for _ in range(min(20, len(hl) * len(vl))):
                     total += real_equity(random.choice(hl), [random.choice(vl)], self.board, 15)
                     count += 1
-                if count: self._m[hbi][vbi] = round(total/count, 4)
+                if count: self._m[hbi][vbi] = round(total / count, 4)
 
     def lookup(self, hb, vb):
         return self._m[hb][vb]
@@ -283,9 +402,15 @@ class FastCFR:
 # ── API ──
 
 def real_equity(hero_combo, villain_combos, board_cards, trials=50):
-    """Quick real equity (used as fallback in FastEquity)."""
-    from pio_solver import _combo_to_hands
-    return _combo_to_hands  # stub, actual impl in equity_db context
+    """Quick real equity via Monte Carlo (used as fallback in FastEquity)."""
+    from equity import equity_vs_range
+    from app import combo_to_hands
+
+    hero_hands = combo_to_hands(hero_combo)
+    if not hero_hands:
+        return 0.5
+    hero_cards = hero_hands[0]  # Take one representative
+    return equity_vs_range(hero_cards, villain_combos, board_cards, trials=trials)
 
 class PioSolver:
     """MAX v4: 6 buckets, vectorized CFR, 200 iters → ~2-3s per solve."""
@@ -294,25 +419,38 @@ class PioSolver:
 
     def solve(self, hero_c, vill_c, board, pot=10, stack=100, pos="IP",
               start='flop', iters=500):
-        # Equity
-        if len(board) == 3:
-            eq = FastEquity(hero_c, vill_c, board, self.nb)
-        else:
-            eq = None  # would need turn equity DB (not implemented)
+        """Solve GTO strategy for any starting street.
+        board: 0 cards (preflop), 3 (flop), 4 (turn), or 5 (river).
+        start: 'preflop', 'flop', 'turn', or 'river'.
+        Returns dict with actions, hero_ev, ev_pct, timing."""
+        n_board = len(board)
 
-        if eq is None:
-            return {'error': 'Only flop starting point supported currently'}
+        # ── Equity ──
+        eq = FastEquity(hero_c, vill_c, board, self.nb)
+        eq_time = time.time()
 
-        # Tree
+        # ── Tree ──
         t0 = time.time()
-        tree = CompactTree(eq, pot, stack, start)
+        if n_board == 0:
+            # Preflop only: simple decision tree, not full CFR
+            actual_start = 'flop'
+        elif n_board == 3:
+            actual_start = start if start in ('flop', 'turn', 'river') else 'flop'
+        elif n_board == 4:
+            actual_start = 'turn' if start != 'river' else 'river'
+        elif n_board >= 5:
+            actual_start = 'river'
+        else:
+            actual_start = start
+
+        tree = CompactTree(eq, pot, stack, actual_start)
         tree_build_time = time.time() - t0
 
-        # Solve
+        # ── Solve ──
         solver = FastCFR(tree, self.nb, iters)
         solve_time = solver.solve()
 
-        # Compute EV
+        # ── EV ──
         hb_set = set(bucketize(hero_c, self.nb).values())
         vb_set = set(bucketize(vill_c, self.nb).values())
         ev_total = count = 0.0
@@ -323,26 +461,26 @@ class PioSolver:
                 count += 1
         hero_ev = ev_total / max(1, count)
 
-        # Root strategy
+        # ── Root strategy ──
         root_s = solver.get_strategy(tree.root)
         acts = {}
         for a, f in root_s.items():
-            label = a.replace('b','BET ').replace('check','CHECK').upper()
-            for k,v in [('33','33%'),('66','66%'),('100','100%')]:
-                label = label.replace(k,v)
-            acts[label] = round(f*100, 1)
+            label = a.replace('b', 'BET ').replace('check', 'CHECK').upper()
+            for k, v in [('33', '33%'), ('66', '66%'), ('100', '100%')]:
+                label = label.replace(k, v)
+            acts[label] = round(f * 100, 1)
 
         return {
             'actions': acts,
             'hero_ev': round(hero_ev, 2),
-            'ev_pct': round(hero_ev/pot*100, 1),
-            'total_time': round(time.time()-t0, 2),
+            'ev_pct': round(hero_ev / pot * 100, 1),
+            'total_time': round(time.time() - t0, 2),
             'tree_time': round(tree_build_time, 3),
             'solve_time': round(solve_time, 2),
             'iters': iters,
             'buckets': self.nb,
-            'start_street': start,
-            'db_used': eq.use_db,
+            'start_street': actual_start,
+            'db_used': getattr(eq, 'use_db', False),
         }
 
 # ── Pre-solved spot cache ──
