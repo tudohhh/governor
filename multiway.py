@@ -1,6 +1,6 @@
 """
-Multi-way pot logic: 3 and 4-handed postflop decisions.
-Adjusts equity calcs, bet sizing, and fold equity for multiple opponents.
+Multi-way pot logic — properly collision-checked.
+3 and 4-handed postflop equity and decision making.
 """
 import random
 from treys import Card, Evaluator
@@ -10,127 +10,117 @@ evaluator = Evaluator()
 RANKS_STR = "AKQJT98765432"
 
 
-def multiway_equity(hero_cards, villain_ranges, board_cards, trials=300):
+def multiway_equity(hero_cards, villain_ranges, board_cards, trials=500):
     """
-    Calculate hero equity vs multiple villains.
-    villain_ranges: list of lists of range strings.
+    Accurate multi-way equity with collision detection.
+    Returns (equity, num_valid_trials).
     """
     if not villain_ranges:
         return 1.0
 
     deck = all_cards()
-    dead = list(hero_cards) + list(board_cards)
-    deck = remove_cards(deck, dead)
+    dead = set(list(hero_cards) + list(board_cards))
+    deck = remove_cards(deck, list(dead))
 
-    # Pre-build villain combo lists
+    # Pre-build valid combos (no overlap with hero/board)
     villain_combos_per_player = []
     for vrange in villain_ranges:
         combos = []
         for rs in vrange:
-            combos.extend(_range_to_combos(rs, deck))
+            for h in _range_to_combos(rs, deck):
+                if h[0] not in dead and h[1] not in dead:
+                    combos.append(h)
         if not combos:
-            return 0.5  # Can't calculate
+            return 0.5  # Can't compute, fallback
         villain_combos_per_player.append(combos)
 
     wins = 0
+    valid = 0
     for _ in range(trials):
-        # Pick one hand per villain
+        all_used = set(dead)
         villain_hands = []
-        used_cards = set(dead)
-        valid = True
+        ok = True
+
         for vc_list in villain_combos_per_player:
-            available = [c for c in vc_list
-                        if c[0] not in used_cards and c[1] not in used_cards]
+            available = []
+            for h in vc_list:
+                if h[0] not in all_used and h[1] not in all_used:
+                    available.append(h)
             if not available:
-                valid = False
+                ok = False
                 break
             chosen = random.choice(available)
             villain_hands.append(chosen)
-            used_cards.add(chosen[0])
-            used_cards.add(chosen[1])
+            all_used.add(chosen[0])
+            all_used.add(chosen[1])
 
-        if not valid:
+        if not ok:
             continue
 
-        all_used = list(used_cards)
-        remaining = remove_cards(deck, [c for h in villain_hands for c in h])
+        remaining = [c for c in deck if c not in all_used]
         needed = 5 - len(board_cards)
-        runout = random.sample(remaining, needed) if needed > 0 else []
-        full_board = list(board_cards) + runout
+        if needed > 0 and len(remaining) >= needed:
+            runout = random.sample(remaining, needed)
+        elif needed <= 0:
+            runout = []
+        else:
+            continue
 
+        full_board = list(board_cards) + runout
         hero_score = evaluator.evaluate(list(hero_cards), full_board)
         villain_scores = [evaluator.evaluate(list(h), full_board) for h in villain_hands]
-        best_villain = min(villain_scores)  # Lower = better in treys
+        best_villain = min(villain_scores)
 
         if hero_score < best_villain:
             wins += 1
         elif hero_score == best_villain:
             wins += 1.0 / (len(villain_hands) + 1)
 
-    return wins / max(1, trials)
+        valid += 1
+
+    if valid == 0:
+        return 0.5
+    return wins / valid
 
 
-def multiway_fold_equity(fold_to_cbet_per_player, num_players=2):
-    """
-    Probability ALL opponents fold to a c-bet.
-    Each opponent folds independently.
-    """
-    prob_all_fold = 1.0
-    for fe in fold_to_cbet_per_player:
-        prob_all_fold *= fe
-    return prob_all_fold
+def multiway_fold_equity(fold_to_cbets):
+    """Probability ALL opponents fold."""
+    prob = 1.0
+    for fe in fold_to_cbets:
+        prob *= fe
+    return prob
 
 
-def multiway_sizing_adjustment(base_sizing_pct, num_opponents):
-    """
-    Adjust bet sizing for multi-way pots.
-    In multi-way, bet smaller to keep ranges wide, or larger to isolate.
-    """
-    if num_opponents >= 3:
-        return base_sizing_pct * 0.7  # Smaller, more cautious
-    elif num_opponents == 2:
-        return base_sizing_pct * 0.85
-    return base_sizing_pct
-
-
-def multiway_cbet_recommendation(hero_equity_mw, prob_all_fold, board_texture, num_opponents):
-    """
-    Whether to c-bet multi-way.
-    Much more selective than heads-up.
-    """
-    if num_opponents >= 3:
-        # 3-way+: only bet with strong equity
-        if hero_equity_mw > 0.45 and prob_all_fold > 0.25:
-            return "BET", 0.40, "Multi-way cu equity > 45% și fold equity decentă"
-        return "CHECK", 0, "Multi-way — prea mulți adversari, check"
-    elif num_opponents == 2:
-        if hero_equity_mw > 0.40 and prob_all_fold > 0.30:
-            return "BET", 0.50, "3-handed cu equity și fold equity"
-        return "CHECK", 0, "3-handed — așteaptă o mână mai bună"
-
-    return "BET", 0.55, "Heads-up standard"
+def multiway_sizing_adjustment(sizing, num_opponents):
+    """Adjust sizing for multi-way: smaller with more opponents."""
+    factors = {1: 1.0, 2: 0.85, 3: 0.65, 4: 0.50}
+    return sizing * factors.get(num_opponents, 0.60)
 
 
 def multiway_decision(hero_cards, villain_ranges, board_cards,
-                      fold_to_cbets, opponent_types, position="IP",
+                      fold_to_cbets, opponent_types=None, position="IP",
                       pot=7.5, stack=100):
-    """
-    Complete multi-way postflop decision.
-    Returns dict with action recommendation.
-    """
+    """Complete multi-way decision."""
     num_opponents = len(villain_ranges)
     if num_opponents == 1:
-        return {"note": "heads-up — use PostflopEngine"}
+        return {"action": "HEADS_UP", "sizing_pct": 0.55,
+                "reasoning": "Folosește PostflopEngine pentru heads-up"}
 
     eq = multiway_equity(hero_cards, villain_ranges, board_cards)
-    prob_fold = multiway_fold_equity(fold_to_cbets, num_opponents)
+    prob_fold = multiway_fold_equity(fold_to_cbets)
 
     from board_analyzer import analyze_flop
     flop = analyze_flop(board_cards)
 
-    action, sizing, reason = multiway_cbet_recommendation(
-        eq, prob_fold, flop, num_opponents
-    )
+    # Multi-way c-bet: much more selective
+    if eq > 0.55 and prob_fold > 0.15:
+        action, sizing, reason = "BET", 0.45, f"Multi-way ({num_opponents} opp) cu equity bună"
+    elif eq > 0.40 and prob_fold > 0.30:
+        action, sizing, reason = "BET", 0.35, f"Fold equity decentă în {num_opponents}-way"
+    elif eq > 0.30 and num_opponents == 2:
+        action, sizing, reason = "BET", 0.33, "3-handed — c-bet exploratoriu"
+    else:
+        action, sizing, reason = "CHECK", 0, f"Multi-way — equity insuficientă"
 
     sizing = multiway_sizing_adjustment(sizing, num_opponents)
 
