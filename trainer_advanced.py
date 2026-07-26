@@ -1,5 +1,6 @@
 """
-Advanced training modes: frequency drill, leak finder, hand review.
+Advanced training: frequency drill (same texture, different scenarios),
+real leak finder (HH-based analysis), hand reviewer.
 """
 import random
 from collections import defaultdict, Counter
@@ -12,201 +13,256 @@ from equity import all_cards, remove_cards
 
 class FrequencyDrill:
     """
-    Frequency-based training: instead of single decisions,
-    present the same scenario multiple times and track bet/check ratio.
+    Frequency drill: N different scenarios with similar board texture.
+    Tests if you can maintain correct frequencies, not memorize answers.
     """
 
-    def __init__(self, hero_position="BTN", villain_position="BB",
-                 opponent_type="standard", num_repetitions=10):
-        self.hero_position = hero_position
-        self.villain_position = villain_position
-        self.opponent_type = opponent_type
-        self.num_repetitions = num_repetitions
-        self.scenario = None
+    def __init__(self, num_scenarios=10):
+        self.num_scenarios = num_scenarios
+        self.scenarios = []
         self.responses = []
-        self.target_frequency = {}
+        self.current_idx = 0
 
-    def generate_scenario(self):
-        """Generate a fixed scenario for frequency drill."""
+    def generate(self, hero_position="BTN", villain_position="BB",
+                 opponent_type="standard"):
+        """Generate N scenarios with similar texture but different cards."""
         deck = all_cards()
         random.shuffle(deck)
+
+        # First scenario determines the texture class
         hero = (deck[0], deck[1])
-        dead = list(hero)
-        remaining = remove_cards(deck, dead)
-        board = remaining[:3]
-        vrange = initial_range(self.villain_position)
+        remaining = remove_cards(deck, list(hero))
+        base_board = remaining[:3]
+        base_texture = analyze_flop(base_board)
+        target_class = base_texture["wetness"]
 
         pos_order = ["UTG","HJ","CO","BTN","SB","BB"]
-        ip = pos_order.index(self.hero_position) > pos_order.index(self.villain_position)
+        ip = pos_order.index(hero_position) > pos_order.index(villain_position)
         position = "IP" if ip else "OOP"
 
+        vrange = initial_range(villain_position)
         engine = PostflopEngine(hero, vrange, position=position,
-                                opponent_type=self.opponent_type,
-                                hero_position=self.hero_position,
-                                villain_position=self.villain_position)
+                                opponent_type=opponent_type,
+                                hero_position=hero_position,
+                                villain_position=villain_position)
+        base_result = engine.decide_flop(base_board)
 
-        result = engine.decide_flop(board)
+        # Record first scenario
+        self.scenarios.append({
+            "hero": hero, "board": base_board, "texture": base_result["texture"],
+            "equity": base_result["equity"], "gto_action": base_result["action"],
+            "gto_reasoning": base_result["reasoning"],
+        })
 
-        # Target frequency from GTO (simplified)
-        self.target_frequency = {
-            "BET": 0.65 if result["action"] == "BET" else 0.35,
-            "CHECK": 0.35 if result["action"] == "BET" else 0.65,
-        }
+        # Generate N-1 more with same texture class
+        attempts = 0
+        while len(self.scenarios) < self.num_scenarios and attempts < 100:
+            attempts += 1
+            deck2 = all_cards()
+            random.shuffle(deck2)
+            h2 = (deck2[0], deck2[1])
+            rem2 = remove_cards(deck2, list(h2))
+            b2 = rem2[:3]
+            tex2 = analyze_flop(b2)
 
-        self.scenario = {
-            "hero": hero,
-            "board": board,
-            "hero_position": self.hero_position,
-            "villain_position": self.villain_position,
-            "texture": result["texture"],
-            "equity": result["equity"],
-            "gto_action": result["action"],
-            "gto_reasoning": result["reasoning"],
-        }
+            if tex2["wetness"] != target_class or tex2["paired"] != base_texture["paired"]:
+                continue
+
+            try:
+                eng2 = PostflopEngine(h2, vrange, position=position,
+                                      opponent_type=opponent_type,
+                                      hero_position=hero_position,
+                                      villain_position=villain_position)
+                res2 = eng2.decide_flop(b2)
+                self.scenarios.append({
+                    "hero": h2, "board": b2, "texture": res2["texture"],
+                    "equity": res2["equity"], "gto_action": res2["action"],
+                    "gto_reasoning": res2["reasoning"],
+                })
+            except:
+                continue
+
         self.responses = []
-        return self.scenario
+        self.current_idx = 0
+        return self.scenarios[0] if self.scenarios else None
 
-    def record_response(self, action):
-        """Record a single response (BET or CHECK)."""
+    def record(self, action):
         self.responses.append(action)
+        self.current_idx += 1
 
-    def get_score(self):
-        """Calculate how well frequencies match GTO target."""
+    def current_scenario(self):
+        if self.current_idx < len(self.scenarios):
+            return self.scenarios[self.current_idx]
+        return None
+
+    def is_done(self):
+        return self.current_idx >= len(self.scenarios)
+
+    def results(self):
         if not self.responses:
-            return {"score": 0, "feedback": "Nicio decizie înregistrată"}
+            return {"score": 0, "feedback": "Nicio decizie"}
 
-        counts = Counter(self.responses)
-        total = len(self.responses)
-        freqs = {action: counts.get(action, 0) / total
-                 for action in ["BET", "CHECK"]}
+        # Compare frequencies
+        gto_actions = [s["gto_action"] for s in self.scenarios[:len(self.responses)]]
+        bet_expected = sum(1 for a in gto_actions if a == "BET") / len(gto_actions)
+        bet_actual = sum(1 for a in self.responses if a == "BET") / len(self.responses)
 
-        # Score: 1.0 = perfect match, 0.0 = completely wrong
-        bet_score = 1.0 - min(1.0, abs(freqs["BET"] - self.target_frequency["BET"]) * 3)
-        check_score = 1.0 - min(1.0, abs(freqs["CHECK"] - self.target_frequency["CHECK"]) * 3)
-        overall = (bet_score + check_score) / 2
+        check_expected = 1 - bet_expected
+        check_actual = 1 - bet_actual
+
+        bet_dev = abs(bet_actual - bet_expected)
+        check_dev = abs(check_actual - check_expected)
+
+        score = 1.0 - (bet_dev + check_dev)
+
+        # Check alternation (consecutive same action is worse than alternating)
+        runs = 0
+        for i in range(1, len(self.responses)):
+            if self.responses[i] != self.responses[i-1]:
+                runs += 1
+        alt_score = min(1.0, runs / max(1, len(self.responses) - 1))
 
         feedback = []
-        if abs(freqs["BET"] - self.target_frequency["BET"]) > 0.15:
-            direction = "mult" if freqs["BET"] > self.target_frequency["BET"] else "puțin"
-            feedback.append(f"Bet-ezi prea {direction} ({freqs['BET']*100:.0f}% vs target {self.target_frequency['BET']*100:.0f}%)")
+        if bet_dev > 0.12:
+            direction = "des" if bet_actual > bet_expected else "rar"
+            feedback.append(f"Bet-ezi prea {direction} ({bet_actual*100:.0f}% vs țintă {bet_expected*100:.0f}%)")
+        if alt_score < 0.4:
+            feedback.append("Alternează mai mult — nu da același răspuns consecutiv")
 
         return {
-            "score": round(overall, 3),
-            "frequencies": {k: round(v, 3) for k, v in freqs.items()},
-            "targets": self.target_frequency,
-            "total_responses": total,
-            "feedback": " | ".join(feedback) if feedback else "Frecvențe bune!"
+            "score": round(max(0, score), 3),
+            "alternation_score": round(alt_score, 3),
+            "bet_actual": round(bet_actual, 3),
+            "bet_expected": round(bet_expected, 3),
+            "total": len(self.responses),
+            "feedback": " | ".join(feedback) if feedback else "Frecvențe excelente!",
         }
 
 
 class LeakFinder:
     """
-    Analyze a batch of decisions and identify systematic leaks.
+    Analyzes poker decisions and finds systematic leaks.
+    Works with real hand histories, not simulated data.
     """
 
     def __init__(self):
         self.decisions = []
 
-    def add_decision(self, decision: dict):
-        """Add a decision to the analysis pool."""
-        self.decisions.append(decision)
+    def add_decision(self, d):
+        self.decisions.append(d)
+
+    def add_from_hand_history(self, hands):
+        """Import decisions from parsed hand histories."""
+        for hand in hands:
+            analysis = hand if isinstance(hand, dict) else {}
+            actions = analysis.get("actions", [])
+            for act in actions:
+                self.decisions.append(act)
 
     def analyze(self):
-        """Find patterns in mistakes."""
         if len(self.decisions) < 5:
-            return {"status": "insufficient_data", "message": "Minim 5 decizii necesare"}
+            return {"insufficient": True, "message": "Minim 5 decizii necesare"}
 
         leaks = []
 
-        # C-bet frequency analysis
-        cbet_situations = [d for d in self.decisions if d.get("street") == "FLOP"
-                          and d.get("bet_faced", 0) == 0]
-        if cbet_situations:
-            cbet_count = sum(1 for d in cbet_situations if d.get("user_action") == "BET")
-            cbet_freq = cbet_count / len(cbet_situations)
-            if cbet_freq > 0.80:
-                leaks.append({
-                    "type": "cbet_too_high",
-                    "severity": "high",
-                    "detail": f"C-bet {cbet_freq*100:.0f}% — prea mult. Ținta: 55-70%",
-                    "fix": "Verifică mai mult pe flop cu equity marginală",
-                })
-            elif cbet_freq < 0.40:
-                leaks.append({
-                    "type": "cbet_too_low",
-                    "severity": "medium",
-                    "detail": f"C-bet {cbet_freq*100:.0f}% — prea puțin. Ținta: 55-70%",
-                    "fix": "C-bet-ează mai mult pe board-uri uscate, chiar și fără equity",
-                })
+        # 1. C-bet frequency
+        cbet_opps = [d for d in self.decisions
+                    if d.get("street") == "flop" and d.get("aggressor") == "hero"]
+        if cbet_opps:
+            freq = sum(1 for d in cbet_opps if d.get("action") == "bet") / len(cbet_opps)
+            if freq > 0.75:
+                leaks.append({"type": "C-bet prea frecvent", "severity": "high",
+                              "detail": f"{freq*100:.0f}% — scoate din range air-ul complet",
+                              "fix": "Check-ează 25-35% din range pe flop"})
+            elif freq < 0.40:
+                leaks.append({"type": "C-bet prea rar", "severity": "medium",
+                              "detail": f"{freq*100:.0f}% — pierzi value",
+                              "fix": "Bet-ează orice board uscat când ai range advantage"})
 
-        # Fold-to-cbet analysis
-        faced_cbet = [d for d in self.decisions if d.get("bet_faced", 0) > 0
-                     and d.get("street") == "FLOP"]
-        if faced_cbet:
-            folds = sum(1 for d in faced_cbet if d.get("user_action") == "FOLD")
-            fold_freq = folds / len(faced_cbet)
-            if fold_freq > 0.75:
-                leaks.append({
-                    "type": "fold_too_much",
-                    "severity": "high",
-                    "detail": f"Fold la c-bet {fold_freq*100:.0f}% — prea mult. Ținta: 45-60%",
-                    "fix": "Apără mai mult: chemi cu overcards, backdoor draws, și pocket pairs",
-                })
+        # 2. Fold to c-bet
+        faced = [d for d in self.decisions
+                if d.get("street") == "flop" and d.get("aggressor") == "villain"]
+        if faced:
+            fold_freq = sum(1 for d in faced if d.get("action") == "fold") / len(faced)
+            if fold_freq > 0.70:
+                leaks.append({"type": "Fold-ezi prea mult la c-bet", "severity": "high",
+                              "detail": f"{fold_freq*100:.0f}% — te exploatează ușor",
+                              "fix": "Apără MDF: cheamă cu backdoor draws + overcards"})
+            elif fold_freq < 0.35:
+                leaks.append({"type": "Chemi prea mult la c-bet", "severity": "medium",
+                              "detail": f"Doar {fold_freq*100:.0f}% fold — plătești prea des",
+                              "fix": "Fold-ează bottom of range pe board-uri wet"})
 
-        # Turn aggression
-        turn_decisions = [d for d in self.decisions if d.get("street") == "TURN"
-                         and d.get("bet_faced", 0) == 0]
-        if turn_decisions:
-            turn_bets = sum(1 for d in turn_decisions if d.get("user_action") == "BET")
-            turn_agg = turn_bets / len(turn_decisions)
-            if turn_agg < 0.25:
-                leaks.append({
-                    "type": "passive_on_turn",
-                    "severity": "medium",
-                    "detail": f"Turn aggression {turn_agg*100:.0f}% — pasiv. Ținta: 35-50%",
-                    "fix": "Double barrel pe turn când ai range advantage",
-                })
+        # 3. Turn aggression
+        turn_opps = [d for d in self.decisions
+                    if d.get("street") == "turn" and d.get("aggressor") == "hero"]
+        if turn_opps:
+            bet_freq = sum(1 for d in turn_opps if d.get("action") == "bet") / len(turn_opps)
+            if bet_freq < 0.25:
+                leaks.append({"type": "Pasiv pe turn", "severity": "medium",
+                              "detail": f"{bet_freq*100:.0f}% barrel — prea pasiv",
+                              "fix": "Double barrel când ai equity și range advantage"})
+            elif bet_freq > 0.65:
+                leaks.append({"type": "Prea agresiv pe turn", "severity": "low",
+                              "detail": f"{bet_freq*100:.0f}% — verifică mai mult",
+                              "fix": "Pot control cu equity marginală"})
 
-        # Sizing consistency
-        bet_sizes = [d.get("sizing", 0) for d in self.decisions
-                    if d.get("user_action") == "BET"]
-        if bet_sizes:
-            avg_size = sum(bet_sizes) / len(bet_sizes)
-            if avg_size < 0.30:
-                leaks.append({
-                    "type": "bet_too_small",
-                    "severity": "low",
-                    "detail": f"Sizing mediu {avg_size*100:.0f}% — mic. Ținta: 40-80%",
-                    "fix": "Mărește sizing-ul pe board-uri wet și când ai value",
-                })
+        # 4. River calling frequency
+        river_facing = [d for d in self.decisions
+                       if d.get("street") == "river" and d.get("aggressor") == "villain"]
+        if river_facing:
+            call_freq = sum(1 for d in river_facing if d.get("action") == "call") / len(river_facing)
+            if call_freq > 0.70:
+                leaks.append({"type": "Call-ezi prea mult pe river", "severity": "high",
+                              "detail": f"{call_freq*100:.0f}% call — hero call prea des",
+                              "fix": "River-ul e value-heavy. Fold fără bluff catcher solid"})
+            elif call_freq < 0.15:
+                leaks.append({"type": "Fold-ezi prea mult pe river", "severity": "low",
+                              "detail": f"Doar {call_freq*100:.0f}% call — exploitabil",
+                              "fix": "Bluff catch vs LAG cu bluff catcher"})
+
+        # 5. Sizing variability
+        sizes = [d.get("sizing", 0) for d in self.decisions
+                if d.get("action") == "bet" and d.get("sizing", 0) > 0]
+        if len(sizes) > 5:
+            unique_sizes = len(set(round(s, 1) for s in sizes))
+            if unique_sizes <= 1:
+                leaks.append({"type": "Sizing predictibil", "severity": "low",
+                              "detail": f"Doar {unique_sizes} mărime de bet — prea previzibil",
+                              "fix": "Variează: 33% pe dry, 66% pe wet, overbet la river"})
+
+        # 6. Check-raise frequency
+        cbet_faced_flop = [d for d in self.decisions
+                          if d.get("street") == "flop" and d.get("aggressor") == "villain"]
+        if cbet_faced_flop:
+            raises = sum(1 for d in cbet_faced_flop if d.get("action") in ("raise", "check-raise"))
+            raise_freq = raises / len(cbet_faced_flop)
+            if raise_freq < 0.03 and len(cbet_faced_flop) > 15:
+                leaks.append({"type": "Zero check-raise-uri", "severity": "medium",
+                              "detail": "Nu faci niciodată check-raise — range-ul tău e transparent",
+                              "fix": "Check-raise 5-8% din range: combo draws + set-uri"})
 
         return {
-            "total_decisions": len(self.decisions),
-            "leaks_found": len(leaks),
+            "total": len(self.decisions),
+            "leaks_count": len(leaks),
             "leaks": leaks,
-            "summary": f"Analizate {len(self.decisions)} decizii, găsite {len(leaks)} leak-uri",
+            "summary": f"{len(leaks)} leak-uri în {len(self.decisions)} decizii",
         }
 
 
 class HandReviewer:
-    """
-    Review a complete hand and provide street-by-street feedback.
-    """
+    """Review a complete hand street-by-street."""
 
     def review(self, hero_cards, board_progression, actions_taken,
                villain_range, position="IP", opponent_type="standard"):
-        """
-        board_progression: list of [flop_3, turn_4?, river_5?]
-        actions_taken: list of {street: ..., action: ..., sizing: ...}
-        """
         feedback = []
         engine = PostflopEngine(hero_cards, villain_range, position=position,
                                 opponent_type=opponent_type)
 
-        for i, (board, action_info) in enumerate(zip(board_progression, actions_taken)):
-            street = action_info.get("street", f"STREET_{i}")
-            user_action = action_info.get("action", "?")
-            bet_faced = action_info.get("bet_faced", 0)
+        for board, act_info in zip(board_progression, actions_taken):
+            street = act_info.get("street", "FLOP")
+            user_action = act_info.get("action", "?")
+            bet_faced = act_info.get("bet_faced", 0)
 
             if street == "FLOP":
                 gto = engine.decide_flop(board, bet_faced)
@@ -217,27 +273,21 @@ class HandReviewer:
             else:
                 continue
 
-            correct = (user_action == gto["action"] or
-                      (user_action == "BET" and gto["action"] == "BET"))
-
-            fb = {
+            correct = user_action == gto["action"]
+            feedback.append({
                 "street": street,
                 "board": [Card.int_to_pretty_str(c) for c in board],
                 "your_action": user_action,
                 "gto_action": gto["action"],
                 "correct": correct,
                 "equity": gto.get("equity", 0),
-                "gto_reasoning": gto.get("reasoning", ""),
-            }
-            feedback.append(fb)
+                "reasoning": gto.get("reasoning", ""),
+            })
 
-        # Overall score
-        correct_count = sum(1 for f in feedback if f["correct"])
-        overall = correct_count / len(feedback) if feedback else 0
-
+        correct = sum(1 for f in feedback if f["correct"])
         return {
             "street_feedback": feedback,
-            "correct": correct_count,
+            "correct": correct,
             "total": len(feedback),
-            "score": round(overall, 3),
+            "score": round(correct / max(1, len(feedback)), 3),
         }
