@@ -81,7 +81,52 @@ GTO_RANGES = {
    "vs_CO":{"88","77","66","55","A9s","A8s","A7s","A6s","A4s","A3s","KJs","KTs","K9s","QTs","Q9s","JTs","J9s","T9s","T8s","98s","87s","76s","65s","ATo"},
    "vs_BTN":{"77","66","55","44","A9s","A8s","A7s","A6s","A3s","A2s","KTs","K9s","K8s","QTs","Q9s","Q8s","J9s","J8s","T9s","T8s","98s","97s","87s","86s","76s","75s","65s","54s","ATo","A9o","KQo","KJo","KTo","QJo","QTo","JTo"},
   }
- }
+ },
+ "VS_3BET":{
+  "4bet":{
+   "vs_UTG":{"AA","KK","QQ","AKs","AKo"},
+   "vs_HJ":{"AA","KK","QQ","AKs","AKo"},
+   "vs_CO":{"AA","KK","QQ","JJ","AKs","AQs","AKo"},
+   "vs_BTN":{"AA","KK","QQ","JJ","TT","AKs","AQs","AKo","AQo"},
+   "vs_SB":{"AA","KK","QQ","JJ","AKs","AQs","AKo","AQo"},
+   "vs_BB":{"AA","KK","QQ","JJ","TT","99","AKs","AQs","AJs","AKo","AQo","AJo"},
+  },
+  "call":{
+   "vs_UTG":{"JJ","TT","AQs","AJs","KQs"},
+   "vs_HJ":{"JJ","TT","99","AQs","AJs","ATs","KQs","KJs","QJs"},
+   "vs_CO":{"TT","99","88","AQs","AJs","ATs","KQs","KJs","QJs","JTs"},
+   "vs_BTN":{"99","88","77","AJs","ATs","A5s","A4s","KQs","KJs","QJs","JTs","T9s","98s"},
+   "vs_SB":{"88","77","66","AQs","AJs","ATs","KQs","KJs","QJs","JTs"},
+   "vs_BB":{"88","77","66","55","AJs","ATs","A5s","A4s","KQs","KJs","QJs","JTs","T9s","98s","87s"},
+  },
+ },
+ "VS_4BET":{
+  "5bet_shove":{
+   "all":{"AA","KK","AKs"},
+  },
+  "call":{
+   "all":{"QQ","JJ","TT","AKo","AQs"},
+  },
+ },
+ "SQUEEZE":{
+  "BTN":{"AA","KK","QQ","JJ","TT","99","AKs","AQs","AJs","ATs","A5s","KQs","KJs","QJs","AKo","AQo","AJo"},
+  "SB":{"AA","KK","QQ","JJ","TT","99","88","AKs","AQs","AJs","ATs","KQs","KJs","QJs","AKo","AQo","AJo"},
+  "BB":{"AA","KK","QQ","JJ","TT","99","88","77","AKs","AQs","AJs","ATs","A5s","A4s","KQs","KJs","QJs","JTs","AKo","AQo","AJo","KQo"},
+ },
+ "BB_DEFENSE":{
+  "vs_SB":{
+   "3bet":{"AA","KK","QQ","JJ","TT","99","88","AKs","AQs","AJs","ATs","A5s","A4s","KQs","KJs","QJs","AKo","AQo","AJo"},
+   "call":{"77","66","55","44","33","22","A9s","A8s","A7s","A6s","A3s","A2s","KTs","K9s","QTs","Q9s","JTs","J9s","T9s","T8s","98s","87s","76s","65s","54s","ATo","A9o","A8o","A7o","A6o","A5o","KQo","KJo","KTo","QJo","QTo","JTo","T9o","98o","87o"},
+  },
+  "vs_BTN":{
+   "3bet":{"AA","KK","QQ","JJ","TT","99","AKs","AQs","AJs","ATs","KQs","KJs","AKo","AQo","AJo"},
+   "call":{"88","77","66","55","44","33","22","A9s","A8s","A7s","A6s","A5s","A4s","A3s","A2s","KTs","K9s","K8s","QTs","Q9s","Q8s","JTs","J9s","J8s","T9s","T8s","T7s","98s","97s","87s","86s","76s","75s","65s","64s","54s","53s","43s","ATo","A9o","A8o","A7o","A6o","A5o","A4o","KQo","KJo","KTo","K9o","QJo","QTo","Q9o","JTo","J9o","T9o","98o","87o"},
+  },
+  "vs_CO":{
+   "3bet":{"AA","KK","QQ","JJ","AKs","AQs","AKo"},
+   "call":{"TT","99","88","77","66","55","44","33","22","AJs","ATs","A9s","A8s","A7s","A6s","A5s","A4s","A3s","A2s","KQs","KJs","KTs","K9s","K8s","QJs","QTs","Q9s","Q8s","JTs","J9s","J8s","T9s","T8s","98s","87s","76s","65s","54s","AQo","AJo","ATo","A9o","A8o","KQo","KJo","KTo","QJo","QTo","JTo","T9o"},
+  },
+ },
 }
 
 def combo_to_hands(combo):
@@ -160,21 +205,67 @@ def get_adjusted_equity(eq_range, eq_rand, profile):
         return base + (eq_rand - base) * blend * 0.5
     return eq_range if eq_range else eq_rand
 
-def preflop_decision(combo, hero_pos, sit="RFI", vpos=None):
+def preflop_decision(combo, hero_pos, sit="RFI", vpos=None, action_history=None):
+    """
+    Full preflop decision tree supporting:
+    - RFI (open raise)
+    - VS_RFI (face an open: 3bet or call)
+    - VS_3BET (face a 3bet: 4bet, call, or fold)
+    - VS_4BET (face a 4bet: 5bet shove, call, or fold)
+    - SQUEEZE (after a raise + call)
+    - BB_DEFENSE (face a steal from SB/BTN/CO)
+    """
     if sit == "RFI":
         rr = GTO_RANGES["RFI"].get(hero_pos, set())
         if combo in rr:
-            return "RAISE", combo + " in range open " + hero_pos + " (" + str(len(rr)) + " combouri)"
-        return "FOLD", combo + " NU e in range open " + hero_pos
+            return "RAISE", f"{combo} in range open {hero_pos} ({len(rr)} combos)"
+        return "FOLD", f"{combo} NOT in range open {hero_pos}"
+
     elif sit == "VS_RFI" and vpos:
         k = "vs_" + vpos
         b3 = GTO_RANGES["VS_RFI"]["3bet"].get(k, set())
         ca = GTO_RANGES["VS_RFI"]["call"].get(k, set())
         if combo in b3:
-            return "3-BET", combo + " in 3-bet range vs " + vpos
+            return "3-BET", f"{combo} in 3-bet range vs {vpos}"
         if combo in ca:
-            return "CALL", combo + " in call range vs " + vpos
-        return "FOLD", combo + " nu e in range vs " + vpos
+            return "CALL", f"{combo} in call range vs {vpos}"
+        return "FOLD", f"{combo} not in range vs {vpos}"
+
+    elif sit == "VS_3BET" and vpos:
+        k = "vs_" + vpos
+        b4 = GTO_RANGES["VS_3BET"]["4bet"].get(k, set())
+        ca = GTO_RANGES["VS_3BET"]["call"].get(k, set())
+        if combo in b4:
+            return "4-BET", f"{combo} in 4-bet range vs {vpos}"
+        if combo in ca:
+            return "CALL_3BET", f"{combo} calls 3-bet vs {vpos}"
+        return "FOLD_TO_3BET", f"{combo} folds to 3-bet vs {vpos}"
+
+    elif sit == "VS_4BET":
+        shove = GTO_RANGES["VS_4BET"]["5bet_shove"]["all"]
+        call_4b = GTO_RANGES["VS_4BET"]["call"]["all"]
+        if combo in shove:
+            return "5-BET_SHOVE", f"{combo} 5-bet shove"
+        if combo in call_4b:
+            return "CALL_4BET", f"{combo} calls 4-bet"
+        return "FOLD_TO_4BET", f"{combo} folds to 4-bet"
+
+    elif sit == "SQUEEZE":
+        sq = GTO_RANGES["SQUEEZE"].get(hero_pos, set())
+        if combo in sq:
+            return "SQUEEZE", f"{combo} in squeeze range from {hero_pos}"
+        return "FOLD", f"{combo} folds to action (not in squeeze range)"
+
+    elif sit == "BB_DEFENSE" and vpos:
+        k = "vs_" + vpos
+        bb3 = GTO_RANGES["BB_DEFENSE"][k]["3bet"]
+        bbc = GTO_RANGES["BB_DEFENSE"][k]["call"]
+        if combo in bb3:
+            return "3-BET", f"{combo} BB 3-bet vs {vpos} steal"
+        if combo in bbc:
+            return "CALL", f"{combo} BB defend vs {vpos} steal"
+        return "FOLD", f"{combo} BB folds to {vpos} steal"
+
     return "FOLD", "?"
 
 def postflop_decision(eq, pot, bet):
@@ -184,7 +275,7 @@ def postflop_decision(eq, pot, bet):
         if eq > 45:
             return "CHECK", "Equity " + str(eq) + "% — marginal"
         return "CHECK", "Equity " + str(eq) + "% — slab"
-    po = bet / (pot + bet) * 100
+    po = bet / (pot + 2 * bet) * 100  # corrected: pot+2*bet not pot+bet
     if eq > po + 10:
         return "RAISE", "Equity " + str(eq) + "% >> pot odds " + str(round(po)) + "%"
     if eq > po:
