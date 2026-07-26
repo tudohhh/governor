@@ -1,6 +1,9 @@
 import streamlit as st
 import random
 from treys import Card, Evaluator
+from board_analyzer import analyze_flop, describe_board
+from equity import equity_vs_range, eq_to_string, all_cards, remove_cards
+from postflop import PostflopEngine
 
 evaluator = Evaluator()
 RANKS = "AKQJT98765432"
@@ -216,8 +219,14 @@ def main():
         st.session_state.drill_total = 0
     if "drill_combo" not in st.session_state:
         st.session_state.drill_combo = None
+    if "postflop_scenario" not in st.session_state:
+        st.session_state.postflop_scenario = None
+    if "postflop_correct" not in st.session_state:
+        st.session_state.postflop_correct = 0
+    if "postflop_total" not in st.session_state:
+        st.session_state.postflop_total = 0
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Analiza Mana", "Range Viewer", "Drill", "Referinta"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Analiza Mana", "Range Viewer", "Drill Preflop", "Drill Postflop", "Referinta"])
 
     with tab1:
         col1, col2 = st.columns([1, 2])
@@ -404,6 +413,94 @@ def main():
             st.rerun()
 
     with tab4:
+        st.subheader("♣ Drill Postflop — NL100")
+        st.caption("Antreneaza decizii pe flop, turn, river. GTO-based.")
+
+        col_pf1, col_pf2 = st.columns([1, 2])
+
+        with col_pf1:
+            opp_type = st.selectbox("Profil adversar", ["standard", "nit", "lag", "fish", "maniac"],
+                                     key="pf_opp")
+            if st.button("Genereaza Scenariu", type="primary", use_container_width=True, key="gen_pf"):
+                # Generate random scenario
+                deck = all_cards()
+                random.shuffle(deck)
+                hero = (deck[0], deck[1])
+                dead = list(hero)
+                remaining = remove_cards(deck, dead)
+                board = remaining[:3]
+
+                # Villain range based on position
+                vpos = random.choice(["UTG", "HJ", "CO", "BTN"])
+                vrange = list(GTO_RANGES["RFI"].get(vpos, set()))
+                pos = "IP" if random.random() > 0.5 else "OOP"
+
+                st.session_state.postflop_scenario = {
+                    "hero": hero,
+                    "board": board,
+                    "vrange": vrange[:20],
+                    "position": pos,
+                    "opponent": opp_type,
+                }
+
+        with col_pf2:
+            sc = st.session_state.postflop_scenario
+            if sc:
+                hero_str = " ".join(Card.int_to_pretty_str(c) for c in sc["hero"])
+                board_str = " ".join(Card.int_to_pretty_str(c) for c in sc["board"])
+                st.markdown(f"### 🤚 {hero_str}")
+                st.markdown(f"### 📋 Flop: {board_str}")
+                st.caption(f"Poziție: **{sc['position']}** | Adversar: **{sc['opponent']}** | Stack: 100BB | Pot: 7.5BB")
+
+                # Board analysis
+                flop = analyze_flop(sc["board"])
+                tex = describe_board(flop)
+                st.info(f"Board: **{tex}** | High: {flop['high_card']} | Wetness: {flop['wetness']}")
+
+                engine = PostflopEngine(
+                    sc["hero"], sc["vrange"],
+                    position=sc["position"],
+                    opponent_type=sc["opponent"],
+                    pot=7.5, stack=100
+                )
+                gto = engine.decide_flop(sc["board"])
+                eq_str = eq_to_string(gto["equity"])
+
+                st.progress(gto["equity"], text=f"Equity: {eq_str}")
+
+                # Decision buttons
+                st.markdown("### Acțiunea ta:")
+                acts = ["BET 1/3 pot", "BET 2/3 pot", "BET pot", "CHECK", "CHECK-FOLD"]
+                cols = st.columns(len(acts))
+                for i, act in enumerate(acts):
+                    if cols[i].button(act, key=f"pf_{act}", use_container_width=True):
+                        user_action = act.split(" ")[0]
+                        correct_action = gto["action"]
+                        is_correct = (user_action == correct_action or
+                                      (user_action == "BET" and correct_action == "BET") or
+                                      (user_action == "CHECK" and correct_action == "CHECK") or
+                                      (user_action == "CHECK-FOLD" and correct_action == "FOLD"))
+
+                        st.session_state.postflop_total += 1
+                        if is_correct:
+                            st.session_state.postflop_correct += 1
+                            st.success(f"✅ CORECT! GTO: {gto['action']} ({gto.get('sizing_bb', 0)}BB)")
+                        else:
+                            st.error(f"❌ GRESIT. GTO: {gto['action']} ({gto.get('sizing_bb', 0)}BB)")
+                        st.info(f"**Raționament:** {gto['reasoning']}")
+                        st.caption(f"Sizing recomandat: {gto.get('sizing', 0)*100:.0f}% pot")
+
+                # Score
+                if st.session_state.postflop_total > 0:
+                    pct = st.session_state.postflop_correct / st.session_state.postflop_total * 100
+                    st.metric("Scor Postflop", f"{st.session_state.postflop_correct}/{st.session_state.postflop_total}", f"{pct:.0f}%")
+
+        if st.button("Reseteaza scor postflop", key="reset_pf"):
+            st.session_state.postflop_correct = 0
+            st.session_state.postflop_total = 0
+            st.rerun()
+
+    with tab5:
         st.subheader("Referinta Rapida")
         st.markdown("""
 **Notatie carti:**
